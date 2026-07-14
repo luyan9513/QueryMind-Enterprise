@@ -14,6 +14,7 @@ This file tracks changes maintained in `luyan9513/QueryMind-Enterprise` on top o
 - Workflow message persistence, legacy conversation fallback, and mobile workspace fixes.
 - Provider, graph relationship, conversation-title, and chat-history tests.
 - Playwright as a reproducible browser-verification dependency.
+- Clean-clone frontend builds now create the generated static directory before syncing the bundle.
 
 ### Verified
 
@@ -26,4 +27,3 @@ This file tracks changes maintained in `luyan9513/QueryMind-Enterprise` on top o
 - No production deployment or concurrency benchmark.
 - No standalone Text2SQL accuracy benchmark for this fork yet.
 - Cloud-model retry, circuit breaking, and alerting are not implemented.
-

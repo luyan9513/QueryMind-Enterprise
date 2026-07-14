@@ -16,6 +16,7 @@ function main() {
     throw new Error(`Missing build artifact: ${SOURCE}`);
   }
 
+  fs.mkdirSync(path.dirname(TARGET), { recursive: true });
   fs.copyFileSync(SOURCE, TARGET);
   console.log(`✓ Synced ${path.relative(process.cwd(), SOURCE)} -> ${path.relative(process.cwd(), TARGET)}`);
 }
