@@ -464,19 +464,16 @@ def _infer_semantic_intents(message: Optional[str]) -> List[str]:
         text,
     ):
         intents.extend(["window", "ranking"])
-
     if re.search(
         r"\b(total|sum|count|average|avg|min|max|subtotal|grand total|summary|rollup|grouping sets?)\b",
         text,
     ):
         intents.append("aggregation")
-
     if re.search(
         r"\b(for each|per|group by|grouped by|each)\b",
         text,
     ):
         intents.append("grouping")
-
     if re.search(
         r"\b(rollup|grouping sets?|subtotal|grand total|hierarchy|levels?)\b",
         text,
@@ -488,13 +485,11 @@ def _infer_semantic_intents(message: Optional[str]) -> List[str]:
         text,
     ):
         intents.append("join")
-
     if re.search(
         r"\b(order by|sorted|ascending|descending|top\s+\d+|top n)\b",
         text,
     ):
         intents.append("ordering")
-
     if re.search(
         r"\b(union(?:\s+all)?|intersect|except)\b",
         text,
@@ -506,7 +501,6 @@ def _infer_semantic_intents(message: Optional[str]) -> List[str]:
         text,
     ):
         intents.append("time_series")
-
     return _dedupe_preserve_order(intents)
 
 
@@ -1559,7 +1553,6 @@ def build_sql_governance_profile(
             query_text,
         ):
             inferred.append("time_series")
-
     categories = _dedupe_preserve_order(inferred)
     notes = _dedupe_preserve_order(raw_tags)
     if category:
@@ -2513,7 +2506,12 @@ def sql_governance_rejection_reason(
 
     sql_features = analyze_sql_text(sql, dialect=dialect or metadata_dialect)
     if sql_features.get("metadata_query"):
-        return "Metadata introspection queries are not allowed for NL2SQL tasks"
+        return (
+            "Metadata introspection queries are not allowed for NL2SQL tasks. "
+            "Do not retry information_schema, pg_catalog, sys, or catalog-table SQL. "
+            "Use schema_retrieve for schema discovery; if the retrieved schema is "
+            "still insufficient, explain the missing evidence or ask a clarification."
+        )
 
     cleaned = (sql or "").strip()
     max_query_length = int(getattr(policy, "max_query_length", 10000) or 10000)

@@ -132,6 +132,15 @@ class _FailingSchemaMemory:
         raise RuntimeError("boom")
 
 
+class _CapturingSchemaMemory:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def search_schema(self, *args, **kwargs):
+        self.calls.append(kwargs)
+        return []
+
+
 class _NoopConversationStore:
     async def get_recent(self, *args, **kwargs):
         return []
@@ -613,6 +622,39 @@ def test_schema_retrieve_failure_preserves_tool_metadata() -> None:
     assert result.metadata["tool_name"] == "schema_retrieve"
     assert result.metadata["query"] == "product"
     assert result.metadata["selected_tables"] == []
+
+
+def test_schema_retrieve_caps_only_unseeded_initial_search() -> None:
+    memory = _CapturingSchemaMemory()
+    tool = SchemaRetrieveTool(schema_memory=memory, max_initial_results=12)
+    context = ToolContext(
+        user=_make_user(),
+        conversation_id="conv-limit",
+        request_id="req-limit",
+        agent_memory=_DummyAgentMemory(),
+        metadata={},
+    )
+
+    initial = asyncio.run(
+        tool.execute(context, SchemaRetrieveToolArgs(query="customer orders", limit=20))
+    )
+    expanded = asyncio.run(
+        tool.execute(
+            context,
+            SchemaRetrieveToolArgs(
+                query="customer orders",
+                search_mode="expand",
+                seed_tables=["sales.orders"],
+                limit=20,
+            ),
+        )
+    )
+
+    assert memory.calls[0]["limit"] == 12
+    assert initial.metadata["requested_limit"] == 20
+    assert initial.metadata["effective_limit"] == 12
+    assert memory.calls[1]["limit"] == 20
+    assert expanded.metadata["effective_limit"] == 20
 
 
 def test_live_schema_snapshot_is_written_back_into_tool_context() -> None:

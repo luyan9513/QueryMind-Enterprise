@@ -1,0 +1,541 @@
+dataset:
+  name: "AdventureWorks 中文经营问答微基准 v0.2"
+  description: "24 条手工设计、可追溯的中文经营问题，覆盖销售、商品、客户、采购、库存和人力主题。"
+
+  test_cases:
+    - id: "aw_zh_001"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "各销售区域累计订单金额是多少？按累计金额从高到低排列。"
+      ground_truth_sql: |
+        SELECT st.name AS territory_name, SUM(soh.totaldue) AS total_sales
+        FROM sales.salesorderheader AS soh
+        JOIN sales.salesterritory AS st ON st.territoryid = soh.territoryid
+        GROUP BY st.territoryid, st.name
+        ORDER BY total_sales DESC, territory_name;
+      expected_schema:
+        tables: ["sales.salesorderheader", "sales.salesterritory"]
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by"]
+        required_columns: ["totaldue", "territoryid"]
+        min_projection_count: 2
+        max_projection_count: 2
+      tags: ["aggregation", "join", "ordering", "multi_table"]
+      difficulty: "easy"
+      metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "aw_zh_002"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "统计 2024 年每个月的订单数和订单总金额，按月份排列。"
+      ground_truth_sql: |
+        SELECT DATE_TRUNC('month', orderdate)::date AS order_month,
+               COUNT(*) AS order_count,
+               SUM(totaldue) AS total_sales
+        FROM sales.salesorderheader
+        WHERE orderdate >= DATE '2024-01-01' AND orderdate < DATE '2025-01-01'
+        GROUP BY DATE_TRUNC('month', orderdate)
+        ORDER BY order_month;
+      expected_schema:
+        tables: ["sales.salesorderheader"]
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "where", "order_by"]
+        required_columns: ["orderdate", "totaldue"]
+        required_filter_columns: ["orderdate"]
+      tags: ["aggregation", "date_filter", "time_series", "group_by"]
+      difficulty: "easy"
+      metadata: {category: "time_series", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "aw_zh_003"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "销量最高的 10 个商品是什么？返回商品名称和销售数量。"
+      ground_truth_sql: |
+        SELECT p.name AS product_name, SUM(sod.orderqty) AS quantity_sold
+        FROM sales.salesorderdetail AS sod
+        JOIN production.product AS p ON p.productid = sod.productid
+        GROUP BY p.productid, p.name
+        ORDER BY quantity_sold DESC, product_name
+        LIMIT 10;
+      expected_schema:
+        tables: ["sales.salesorderdetail", "production.product"]
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by", "limit"]
+        required_columns: ["orderqty", "productid"]
+        max_projection_count: 2
+      tags: ["aggregation", "join", "topk", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "topk", source: "manual", query_language: "zh", business_domain: "product"}
+
+    - id: "aw_zh_004"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "各商品大类的销售收入是多少？按销售收入从高到低排列。"
+      ground_truth_sql: |
+        SELECT pc.name AS category_name, SUM(sod.orderqty * sod.unitprice * (1 - sod.unitpricediscount)) AS revenue
+        FROM sales.salesorderdetail AS sod
+        JOIN production.product AS p ON p.productid = sod.productid
+        JOIN production.productsubcategory AS psc ON psc.productsubcategoryid = p.productsubcategoryid
+        JOIN production.productcategory AS pc ON pc.productcategoryid = psc.productcategoryid
+        GROUP BY pc.productcategoryid, pc.name
+        ORDER BY revenue DESC, category_name;
+      expected_schema:
+        tables: ["sales.salesorderdetail", "production.product", "production.productsubcategory", "production.productcategory"]
+      result_comparison:
+        numeric_decimal_places: 2
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by"]
+        required_columns: ["orderqty", "unitprice", "unitpricediscount"]
+        max_projection_count: 2
+      tags: ["aggregation", "join", "multi_table", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "join", source: "manual", query_language: "zh", business_domain: "product"}
+
+    - id: "aw_zh_005"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "订单金额最高的 10 位客户是谁？返回客户编号和累计订单金额。"
+      ground_truth_sql: |
+        SELECT customerid, SUM(totaldue) AS total_sales
+        FROM sales.salesorderheader
+        GROUP BY customerid
+        ORDER BY total_sales DESC, customerid
+        LIMIT 10;
+      expected_schema:
+        tables: ["sales.salesorderheader"]
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "order_by", "limit"]
+        required_columns: ["customerid", "totaldue"]
+        max_projection_count: 2
+      tags: ["aggregation", "topk", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "topk", source: "manual", query_language: "zh", business_domain: "customer"}
+
+    - id: "aw_zh_006"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "各区域有多少个不同客户下过订单？按客户数从高到低排列。"
+      ground_truth_sql: |
+        SELECT st.name AS territory_name, COUNT(DISTINCT soh.customerid) AS customer_count
+        FROM sales.salesorderheader AS soh
+        JOIN sales.salesterritory AS st ON st.territoryid = soh.territoryid
+        GROUP BY st.territoryid, st.name
+        ORDER BY customer_count DESC, territory_name;
+      expected_schema:
+        tables: ["sales.salesorderheader", "sales.salesterritory"]
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by", "distinct"]
+        required_columns: ["customerid", "territoryid"]
+        max_projection_count: 2
+      tags: ["aggregation", "join", "distinct", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "distinct", source: "manual", query_language: "zh", business_domain: "customer"}
+
+    - id: "aw_zh_007"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "线上订单和线下订单分别有多少笔、总金额是多少？"
+      ground_truth_sql: |
+        SELECT CASE WHEN onlineorderflag THEN 'online' ELSE 'offline' END AS order_channel,
+               COUNT(*) AS order_count,
+               SUM(totaldue) AS total_sales
+        FROM sales.salesorderheader
+        GROUP BY onlineorderflag
+        ORDER BY order_channel;
+      expected_schema:
+        tables: ["sales.salesorderheader"]
+      result_comparison:
+        order_sensitive: false
+        value_aliases:
+          online: ["线上", "线上订单"]
+          offline: ["线下", "线下订单"]
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "case_when"]
+        required_columns: ["onlineorderflag", "totaldue"]
+        max_projection_count: 3
+      tags: ["aggregation", "case_when", "group_by"]
+      difficulty: "easy"
+      metadata: {category: "case_when", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "aw_zh_008"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "每种销售原因关联了多少张订单？按订单数从高到低排列。"
+      ground_truth_sql: |
+        SELECT sr.name AS reason_name, COUNT(DISTINCT sohsr.salesorderid) AS order_count
+        FROM sales.salesreason AS sr
+        JOIN sales.salesorderheadersalesreason AS sohsr ON sohsr.salesreasonid = sr.salesreasonid
+        GROUP BY sr.salesreasonid, sr.name
+        ORDER BY order_count DESC, reason_name;
+      expected_schema:
+        tables: ["sales.salesreason", "sales.salesorderheadersalesreason"]
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by", "distinct"]
+        required_columns: ["salesreasonid", "salesorderid"]
+        max_projection_count: 2
+      tags: ["aggregation", "join", "distinct", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "join", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "aw_zh_009"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "哪些商品从未产生过销售明细？返回商品编号和名称。"
+      ground_truth_sql: |
+        SELECT p.productid, p.name AS product_name
+        FROM production.product AS p
+        WHERE NOT EXISTS (
+          SELECT 1 FROM sales.salesorderdetail AS sod WHERE sod.productid = p.productid
+        )
+        ORDER BY p.productid;
+      expected_schema:
+        tables: ["production.product", "sales.salesorderdetail"]
+      expected_sql_contract:
+        required_features: ["where", "subquery", "order_by"]
+        required_columns: ["productid"]
+        max_projection_count: 2
+      tags: ["subquery", "multi_table", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "subquery", source: "manual", query_language: "zh", business_domain: "product"}
+
+    - id: "aw_zh_010"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "统计各种颜色的商品数量，颜色为空的归为“未标注”。"
+      ground_truth_sql: |
+        SELECT COALESCE(color, '未标注') AS color_label, COUNT(*) AS product_count
+        FROM production.product
+        GROUP BY COALESCE(color, '未标注')
+        ORDER BY product_count DESC, color_label;
+      expected_schema:
+        tables: ["production.product"]
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "order_by"]
+        required_columns: ["color"]
+        max_projection_count: 2
+      tags: ["aggregation", "null_handling", "group_by", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "null_handling", source: "manual", query_language: "zh", business_domain: "product"}
+
+    - id: "aw_zh_011"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "各库位当前库存总量是多少？按库存量从高到低排列。"
+      ground_truth_sql: |
+        SELECT l.name AS location_name, SUM(pi.quantity) AS inventory_quantity
+        FROM production.productinventory AS pi
+        JOIN production.location AS l ON l.locationid = pi.locationid
+        GROUP BY l.locationid, l.name
+        ORDER BY inventory_quantity DESC, location_name;
+      expected_schema:
+        tables: ["production.productinventory", "production.location"]
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by"]
+        required_columns: ["locationid", "quantity"]
+        max_projection_count: 2
+      tags: ["aggregation", "join", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "inventory"}
+
+    - id: "aw_zh_012"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "列出库存低于商品安全库存量的商品，并汇总它们的当前库存。"
+      ground_truth_sql: |
+        SELECT p.productid, p.name AS product_name, p.safetystocklevel,
+               COALESCE(SUM(pi.quantity), 0) AS inventory_quantity
+        FROM production.product AS p
+        LEFT JOIN production.productinventory AS pi ON pi.productid = p.productid
+        GROUP BY p.productid, p.name, p.safetystocklevel
+        HAVING COALESCE(SUM(pi.quantity), 0) < p.safetystocklevel
+        ORDER BY p.productid;
+      expected_schema:
+        tables: ["production.product", "production.productinventory"]
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "having", "order_by"]
+        forbidden_features: ["limit", "offset"]
+        required_columns: ["productid", "safetystocklevel", "quantity"]
+      tags: ["aggregation", "join", "having", "null_handling"]
+      difficulty: "medium"
+      metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "inventory"}
+
+    - id: "aw_zh_013"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "各供应商的采购订单总金额是多少？只看仍处于启用状态的供应商。"
+      ground_truth_sql: |
+        SELECT v.name AS vendor_name, SUM(poh.subtotal + poh.taxamt + poh.freight) AS purchase_total
+        FROM purchasing.vendor AS v
+        JOIN purchasing.purchaseorderheader AS poh ON poh.vendorid = v.businessentityid
+        WHERE v.activeflag = true
+        GROUP BY v.businessentityid, v.name
+        ORDER BY purchase_total DESC, vendor_name;
+      expected_schema:
+        tables: ["purchasing.vendor", "purchasing.purchaseorderheader"]
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "where", "order_by"]
+        required_columns: ["activeflag", "subtotal", "taxamt", "freight"]
+        required_filter_columns: ["activeflag"]
+        max_projection_count: 2
+      tags: ["aggregation", "join", "filtering", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "purchasing"}
+
+    - id: "aw_zh_014"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "不同运输方式承运了多少张采购订单，平均运费是多少？"
+      ground_truth_sql: |
+        SELECT sm.name AS ship_method, COUNT(*) AS purchase_order_count,
+               AVG(poh.freight) AS average_freight
+        FROM purchasing.purchaseorderheader AS poh
+        JOIN purchasing.shipmethod AS sm ON sm.shipmethodid = poh.shipmethodid
+        GROUP BY sm.shipmethodid, sm.name
+        ORDER BY purchase_order_count DESC, ship_method;
+      expected_schema:
+        tables: ["purchasing.purchaseorderheader", "purchasing.shipmethod"]
+      result_comparison:
+        numeric_decimal_places: 2
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by"]
+        required_columns: ["freight", "shipmethodid"]
+        max_projection_count: 3
+      tags: ["aggregation", "join", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "join", source: "manual", query_language: "zh", business_domain: "purchasing"}
+
+    - id: "aw_zh_015"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "采购订单从下单到发货平均需要多少天？按供应商统计，只包含已经发货的订单。"
+      ground_truth_sql: |
+        SELECT v.name AS vendor_name, AVG(poh.shipdate::date - poh.orderdate::date) AS average_lead_days
+        FROM purchasing.purchaseorderheader AS poh
+        JOIN purchasing.vendor AS v ON v.businessentityid = poh.vendorid
+        WHERE poh.shipdate IS NOT NULL
+        GROUP BY v.businessentityid, v.name
+        ORDER BY average_lead_days DESC, vendor_name;
+      expected_schema:
+        tables: ["purchasing.purchaseorderheader", "purchasing.vendor"]
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "where", "order_by"]
+        required_columns: ["shipdate", "orderdate", "vendorid"]
+        required_filter_columns: ["shipdate"]
+        max_projection_count: 2
+      tags: ["aggregation", "join", "null_handling", "date_filter"]
+      difficulty: "medium"
+      metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "purchasing"}
+
+    - id: "aw_zh_016"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "目前每个部门有多少在职员工？按在职人数从高到低排列。"
+      ground_truth_sql: |
+        SELECT d.name AS department_name, COUNT(DISTINCT edh.businessentityid) AS employee_count
+        FROM humanresources.employeedepartmenthistory AS edh
+        JOIN humanresources.department AS d ON d.departmentid = edh.departmentid
+        JOIN humanresources.employee AS e ON e.businessentityid = edh.businessentityid
+        WHERE edh.enddate IS NULL AND e.currentflag = true
+        GROUP BY d.departmentid, d.name
+        ORDER BY employee_count DESC, department_name;
+      expected_schema:
+        tables: ["humanresources.employeedepartmenthistory", "humanresources.department", "humanresources.employee"]
+      result_comparison:
+        order_sensitive: false
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "where", "order_by", "distinct"]
+        required_columns: ["businessentityid", "enddate", "currentflag"]
+        required_filter_columns: ["enddate", "currentflag"]
+        max_projection_count: 2
+      tags: ["aggregation", "join", "null_handling", "distinct"]
+      difficulty: "medium"
+      metadata: {category: "join", source: "manual", query_language: "zh", business_domain: "human_resources"}
+
+    - id: "aw_zh_017"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "按职位统计当前员工人数，只展示人数不少于 5 人的职位。"
+      ground_truth_sql: |
+        SELECT jobtitle, COUNT(*) AS employee_count
+        FROM humanresources.employee
+        WHERE currentflag = true
+        GROUP BY jobtitle
+        HAVING COUNT(*) >= 5
+        ORDER BY employee_count DESC, jobtitle;
+      expected_schema:
+        tables: ["humanresources.employee"]
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "where", "having", "order_by"]
+        required_columns: ["jobtitle", "currentflag"]
+        required_filter_columns: ["currentflag"]
+        max_projection_count: 2
+      tags: ["aggregation", "filtering", "having", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "human_resources"}
+
+    - id: "aw_zh_018"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "对销售人员按本年累计销售额排名，返回人员编号、销售额和名次。"
+      ground_truth_sql: |
+        SELECT businessentityid, salesytd,
+               DENSE_RANK() OVER (ORDER BY salesytd DESC) AS sales_rank
+        FROM sales.salesperson
+        ORDER BY sales_rank, businessentityid;
+      expected_schema:
+        tables: ["sales.salesperson"]
+      expected_sql_contract:
+        required_features: ["window", "order_by"]
+        required_columns: ["businessentityid", "salesytd"]
+        min_projection_count: 3
+        max_projection_count: 3
+      tags: ["ranking", "window", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "ranking", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "aw_zh_019"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "按年统计销售总额，并计算相对上一年的增长额。"
+      ground_truth_sql: |
+        WITH yearly_sales AS (
+          SELECT EXTRACT(YEAR FROM orderdate)::int AS sales_year, SUM(totaldue) AS total_sales
+          FROM sales.salesorderheader
+          GROUP BY EXTRACT(YEAR FROM orderdate)
+        )
+        SELECT sales_year, total_sales,
+               total_sales - LAG(total_sales) OVER (ORDER BY sales_year) AS year_over_year_change
+        FROM yearly_sales
+        ORDER BY sales_year;
+      expected_schema:
+        tables: ["sales.salesorderheader"]
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "window", "order_by"]
+        required_columns: ["orderdate", "totaldue"]
+        forbidden_columns: ["modifieddate"]
+        min_projection_count: 3
+      tags: ["cte", "window", "time_series", "comparison"]
+      difficulty: "medium"
+      metadata: {category: "time_series", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "aw_zh_020"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "统计 2024 年每个月的销售额以及从年初到当月的累计销售额。"
+      ground_truth_sql: |
+        WITH monthly_sales AS (
+          SELECT DATE_TRUNC('month', orderdate)::date AS order_month, SUM(totaldue) AS monthly_sales
+          FROM sales.salesorderheader
+          WHERE orderdate >= DATE '2024-01-01' AND orderdate < DATE '2025-01-01'
+          GROUP BY DATE_TRUNC('month', orderdate)
+        )
+        SELECT order_month, monthly_sales,
+               SUM(monthly_sales) OVER (ORDER BY order_month) AS cumulative_sales
+        FROM monthly_sales
+        ORDER BY order_month;
+      expected_schema:
+        tables: ["sales.salesorderheader"]
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "window", "where", "order_by"]
+        required_columns: ["orderdate", "totaldue"]
+        forbidden_columns: ["subtotal"]
+        required_filter_columns: ["orderdate"]
+        min_projection_count: 3
+      tags: ["cte", "window", "time_series", "aggregation"]
+      difficulty: "medium"
+      metadata: {category: "window", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "aw_zh_021"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "按商品计算销售收入、估算成本和估算毛利，展示估算毛利最高的 10 个商品。"
+      ground_truth_sql: |
+        SELECT p.name AS product_name,
+               SUM(sod.orderqty * sod.unitprice * (1 - sod.unitpricediscount)) AS revenue,
+               SUM(sod.orderqty * p.standardcost) AS estimated_cost,
+               SUM(sod.orderqty * (sod.unitprice * (1 - sod.unitpricediscount) - p.standardcost)) AS estimated_margin
+        FROM sales.salesorderdetail AS sod
+        JOIN production.product AS p ON p.productid = sod.productid
+        GROUP BY p.productid, p.name
+        ORDER BY estimated_margin DESC, product_name
+        LIMIT 10;
+      expected_schema:
+        tables: ["sales.salesorderdetail", "production.product"]
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by", "limit"]
+        required_columns: ["orderqty", "unitprice", "unitpricediscount", "standardcost"]
+        min_projection_count: 4
+        max_projection_count: 4
+      tags: ["aggregation", "join", "topk", "comparison"]
+      difficulty: "medium"
+      metadata: {category: "comparison", source: "manual", query_language: "zh", business_domain: "product"}
+
+    - id: "aw_zh_022"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "哪些销售区域本年累计销售额低于上一年？返回区域名称和两年的销售额。"
+      ground_truth_sql: |
+        SELECT name AS territory_name, salesytd, saleslastyear
+        FROM sales.salesterritory
+        WHERE salesytd < saleslastyear
+        ORDER BY name;
+      expected_schema:
+        tables: ["sales.salesterritory"]
+      result_comparison:
+        numeric_decimal_places: 2
+        order_sensitive: false
+      expected_sql_contract:
+        required_features: ["where"]
+        required_columns: ["salesytd", "saleslastyear"]
+        required_filter_columns: ["salesytd", "saleslastyear"]
+        max_projection_count: 3
+      tags: ["comparison", "filtering", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "comparison", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "aw_zh_023"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "按国家或地区统计客户数量，依据客户所属销售区域计算。"
+      ground_truth_sql: |
+        SELECT st.countryregioncode, COUNT(*) AS customer_count
+        FROM sales.customer AS c
+        JOIN sales.salesterritory AS st ON st.territoryid = c.territoryid
+        GROUP BY st.countryregioncode
+        ORDER BY customer_count DESC, st.countryregioncode;
+      expected_schema:
+        tables: ["sales.customer", "sales.salesterritory"]
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by"]
+        required_columns: ["countryregioncode", "territoryid"]
+        required_projection_aliases: ["countryregioncode"]
+        max_projection_count: 2
+      tags: ["aggregation", "join", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "customer"}
+
+    - id: "aw_zh_024"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "比较各销售区域 2023 年和 2024 年的订单金额。"
+      ground_truth_sql: |
+        SELECT st.name AS territory_name,
+               SUM(CASE WHEN soh.orderdate >= DATE '2023-01-01' AND soh.orderdate < DATE '2024-01-01' THEN soh.totaldue ELSE 0 END) AS sales_2023,
+               SUM(CASE WHEN soh.orderdate >= DATE '2024-01-01' AND soh.orderdate < DATE '2025-01-01' THEN soh.totaldue ELSE 0 END) AS sales_2024
+        FROM sales.salesorderheader AS soh
+        JOIN sales.salesterritory AS st ON st.territoryid = soh.territoryid
+        WHERE soh.orderdate >= DATE '2023-01-01' AND soh.orderdate < DATE '2025-01-01'
+        GROUP BY st.territoryid, st.name
+        ORDER BY territory_name;
+      expected_schema:
+        tables: ["sales.salesorderheader", "sales.salesterritory"]
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "case_when", "where", "order_by"]
+        required_columns: ["orderdate", "totaldue", "territoryid"]
+        required_filter_columns: ["orderdate"]
+        required_projection_aliases: ["sales_2023", "sales_2024"]
+        min_projection_count: 3
+        max_projection_count: 3
+      tags: ["aggregation", "join", "case_when", "comparison", "date_filter"]
+      difficulty: "medium"
+      metadata: {category: "comparison", source: "manual", query_language: "zh", business_domain: "sales"}

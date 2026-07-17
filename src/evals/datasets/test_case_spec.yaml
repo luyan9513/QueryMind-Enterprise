@@ -72,6 +72,86 @@ test_case_fields:
       FROM sales
       GROUP BY region;
 
+  expected_schema:
+    required: false
+    type: object
+    description: Expected tables and optional columns used to measure Schema Recall.
+    sample:
+      tables: ["sales.salesorderheader", "sales.salesterritory"]
+      columns:
+        sales.salesorderheader: ["territoryid", "totaldue"]
+    fields:
+      tables:
+        required: true
+        type: list[string]
+        description: Fully qualified tables required to answer the question.
+        sample: ["sales.salesorderheader", "sales.salesterritory"]
+      columns:
+        required: false
+        type: object
+        description: Optional expected columns grouped by fully qualified table name.
+
+  result_comparison:
+    required: false
+    type: object
+    description: Dataset-owned normalization rules for deterministic result comparison.
+    sample:
+      numeric_decimal_places: 2
+      order_sensitive: false
+      compare_column_names: false
+      value_aliases: {online: ["线上订单"], offline: ["线下订单"]}
+    fields:
+      numeric_decimal_places:
+        required: false
+        type: integer
+      order_sensitive:
+        required: false
+        type: boolean
+      compare_column_names:
+        required: false
+        type: boolean
+      value_aliases:
+        required: false
+        type: object
+
+  expected_sql_contract:
+    required: false
+    type: object
+    description: Structural SQL requirements owned by this dataset, never injected into the runtime agent.
+    sample:
+      required_features: ["group_by", "where"]
+      required_columns: ["orderdate", "totaldue"]
+      forbidden_columns: ["modifieddate"]
+      required_filter_columns: ["orderdate"]
+      required_projection_aliases: ["total_sales"]
+      min_projection_count: 2
+      max_projection_count: 4
+    fields:
+      required_features:
+        required: false
+        type: list[string]
+      forbidden_features:
+        required: false
+        type: list[string]
+      required_columns:
+        required: false
+        type: list[string]
+      forbidden_columns:
+        required: false
+        type: list[string]
+      required_filter_columns:
+        required: false
+        type: list[string]
+      required_projection_aliases:
+        required: false
+        type: list[string]
+      min_projection_count:
+        required: false
+        type: integer
+      max_projection_count:
+        required: false
+        type: integer
+
   tags:
     required: false
     type: list[string]
@@ -160,6 +240,11 @@ test_case_fields:
         allowed_values:
           - zh
           - en
+      business_domain:
+        required: false
+        type: string
+        description: Business domain used for benchmark slicing.
+        sample: "sales"
 
   expected_outcome:
     required: false
@@ -188,5 +273,5 @@ test_case_fields:
 
 notes:
   - "The loader validates required_fields, allowed_values, and the presence of test_cases."
-  - "metadata and expected_outcome are optional for scoring, but their declared subfields are validated when present."
+  - "metadata, expected_schema, result_comparison, expected_sql_contract, and expected_outcome are optional, but their declared subfields are validated when present."
   - "category should be treated as the primary label; tags are secondary labels."

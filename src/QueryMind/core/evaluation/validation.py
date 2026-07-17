@@ -138,6 +138,9 @@ class EvaluationDatasetValidator:
         elif type_name == "integer":
             if not isinstance(value, int) or isinstance(value, bool):
                 issues.append(ValidationIssue(path=path, message="Expected integer"))
+        elif type_name == "boolean":
+            if not isinstance(value, bool):
+                issues.append(ValidationIssue(path=path, message="Expected boolean"))
         elif type_name == "list[string]":
             if not isinstance(value, list):
                 issues.append(ValidationIssue(path=path, message="Expected list[string]"))

@@ -59,10 +59,59 @@ if TYPE_CHECKING:
 
 
 _SQL_WHITESPACE_RE = re.compile(r"\s+")
+_METADATA_SQL_REFERENCE_RE = re.compile(
+    r"(?i)(?:\binformation_schema\b|\bpg_catalog\b|\bpg_(?:class|attribute|constraint|namespace|index|indexes)\b|\bsys\.)"
+)
+_METADATA_RECOVERY_PROMPT = """
+## Metadata Query Recovery
+
+Repeated metadata SQL was rejected. `run_sql` is temporarily unavailable for
+this one recovery step. Use one focused `schema_retrieve` call with business
+terms and `required_fields` for the missing evidence. After that, draft SQL
+against business tables only. Do not query information_schema, pg_catalog,
+sys, or other catalog tables. If the business meaning is still ambiguous, ask
+the user to clarify instead of guessing.
+""".strip()
+_METADATA_RECOVERY_EXHAUSTED_PROMPT = """
+## Metadata Query Recovery Exhausted
+
+Metadata SQL is blocked and the focused schema recovery step has already been
+used. Do not call tools again in this turn. Explain which business field or
+definition is still missing and ask the user for a concise clarification.
+Never guess a query from unsupported schema evidence.
+""".strip()
 
 
 def _normalize_sql_text(sql: str) -> str:
     return _SQL_WHITESPACE_RE.sub(" ", sql.strip()).lower()
+
+
+def _is_rejected_metadata_sql(tool_call: ToolCall, result: ToolResult) -> bool:
+    if tool_call.name != "run_sql" or result.success:
+        return False
+    if str(result.metadata.get("rejection_stage") or "") != "governance":
+        return False
+    sql = tool_call.arguments.get("sql")
+    return isinstance(sql, str) and bool(_METADATA_SQL_REFERENCE_RE.search(sql))
+
+
+def _metadata_recovery_tools(tool_schemas: List[ToolSchema]) -> List[ToolSchema]:
+    return [tool for tool in tool_schemas if tool.name == "schema_retrieve"]
+
+
+def _append_metadata_recovery_prompt(
+    system_prompt: Optional[str],
+    *,
+    exhausted: bool = False,
+) -> str:
+    recovery_prompt = (
+        _METADATA_RECOVERY_EXHAUSTED_PROMPT
+        if exhausted
+        else _METADATA_RECOVERY_PROMPT
+    )
+    return "\n\n".join(
+        part for part in [system_prompt or "", recovery_prompt] if part
+    )
 
 
 def _find_last_successful_run_sql(tool_results: List[Dict[str, Any]]) -> Optional[str]:
@@ -899,6 +948,9 @@ class Agent:
         )
 
         tool_iterations = 0
+        metadata_query_rejections = 0
+        metadata_recovery_pending = False
+        metadata_recovery_attempts = 0
         all_tool_results: List[Dict[str, Any]] = []
         request_metadata = {
             **dict(request_context.metadata or {}),
@@ -934,6 +986,25 @@ class Agent:
                 )
             )
             request_metadata.update(prepared_metadata)
+            metadata_recovery_turn = metadata_recovery_pending
+            if metadata_recovery_turn:
+                recovery_exhausted = metadata_recovery_attempts >= 1
+                visible_tool_schemas = (
+                    []
+                    if recovery_exhausted
+                    else _metadata_recovery_tools(tool_schemas)
+                )
+                system_prompt = _append_metadata_recovery_prompt(
+                    system_prompt,
+                    exhausted=recovery_exhausted,
+                )
+                request_metadata["metadata_query_recovery"] = True
+                request_metadata["metadata_query_recovery_exhausted"] = (
+                    recovery_exhausted
+                )
+            else:
+                request_metadata.pop("metadata_query_recovery", None)
+                request_metadata.pop("metadata_query_recovery_exhausted", None)
 
             if self.observability_provider and prompt_span:
                 prompt_span.set_attribute(
@@ -976,6 +1047,10 @@ class Agent:
                     role="assistant",
                     content=response.content or "",  # Ensure content is not None
                     tool_calls=response.tool_calls,
+                    metadata={
+                        "llm_usage": dict(response.usage or {}),
+                        "llm_model": getattr(self.llm_service, "model", "unknown"),
+                    },
                 )
                 conversation.add_message(assistant_message)
 
@@ -1137,6 +1212,21 @@ class Agent:
                         )
 
                     result = await self.tool_registry.execute(tool_call, context)
+
+                    if _is_rejected_metadata_sql(tool_call, result):
+                        metadata_query_rejections += 1
+                        if (
+                            metadata_query_rejections
+                            >= self.config.max_metadata_query_retries
+                        ):
+                            metadata_recovery_pending = True
+                    elif metadata_recovery_turn and tool_call.name == "schema_retrieve":
+                        metadata_query_rejections = 0
+                        metadata_recovery_pending = False
+                        metadata_recovery_attempts += 1
+                    elif tool_call.name == "run_sql" and result.success:
+                        metadata_query_rejections = 0
+                        metadata_recovery_pending = False
 
                     if self.observability_provider and tool_exec_span:
                         tool_exec_span.set_attribute("success", result.success)
@@ -1335,10 +1425,14 @@ class Agent:
                 # Add tool responses to conversation
                 # For APIs that need all tool results in one message, this helps
                 for tool_result in tool_results:
+                    trace_metadata = dict(tool_result.get("metadata", {}))
+                    trace_metadata["tool_success"] = bool(tool_result.get("success"))
+                    if not tool_result.get("success"):
+                        trace_metadata["tool_error"] = tool_result.get("content")
                     tool_response_message = Message(
                         role="tool",
                         content=tool_result["content"],
-                        metadata=tool_result.get("metadata", {}),
+                        metadata=trace_metadata,
                         tool_call_id=tool_result["tool_call_id"],
                         tool_result=tool_result.get("metadata", {}),
                     )
@@ -1370,7 +1464,16 @@ class Agent:
                 if final_response_content:
                     # Add assistant response to conversation
                     conversation.add_message(
-                        Message(role="assistant", content=final_response_content)
+                        Message(
+                            role="assistant",
+                            content=final_response_content,
+                            metadata={
+                                "llm_usage": dict(response.usage or {}),
+                                "llm_model": getattr(
+                                    self.llm_service, "model", "unknown"
+                                ),
+                            },
+                        )
                     )
                     yield UiComponent(
                         rich_component=RichTextComponent(

@@ -38,6 +38,8 @@ class HybridSearchConfig:
     rrf_k: int = 60
     max_vector_results: int = 50
     max_graph_results: int = 50
+    graph_seed_count: int = 3
+    graph_seed_max_hops: int = 1
     min_fusion_score: float = 0.0
 
 
@@ -194,9 +196,6 @@ class SchemaSearch:
         Returns:
             List of FusionResult sorted by fusion score
         """
-        # Parallel search: vector and graph.
-        # Only run graph search when we have explicit graph hints. Natural
-        # language queries are not reliable graph domains and can wipe out recall.
         vector_task = self._vector_store.search_by_query(
             query=query,
             limit=self._config.max_vector_results,
@@ -204,19 +203,36 @@ class SchemaSearch:
             domain_filter=domain_filter,
         )
 
+        vector_results = await vector_task
+
         if required_fields:
-            graph_task = self._search_graph_by_fields(
+            graph_results = await self._search_graph_by_fields(
                 field_names=required_fields,
                 domain_filter=domain_filter,
             )
         elif domain_filter:
-            graph_task = self._search_graph_by_domain(domain_filter)
+            graph_results = await self._search_graph_by_domain(domain_filter)
+        elif vector_results:
+            seed_results = vector_results[: max(1, self._config.graph_seed_count)]
+            expansion_results = await asyncio.gather(
+                *(
+                    self._graph_store.find_related_tables(
+                        table_name=result.table_name,
+                        schema_name=result.schema_name,
+                        max_hops=max(1, self._config.graph_seed_max_hops),
+                    )
+                    for result in seed_results
+                ),
+                return_exceptions=True,
+            )
+            graph_results = []
+            for expanded in expansion_results:
+                if isinstance(expanded, list):
+                    graph_results.extend(
+                        item for item in expanded if isinstance(item, dict)
+                    )
         else:
-            graph_task = asyncio.sleep(0, result=[])
-        
-        vector_results, graph_results = await asyncio.gather(
-            vector_task, graph_task
-        )
+            graph_results = []
         
         if vector_results and not graph_results:
             return self._rrf_fusion(vector_results, [])[:limit]

@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import List
 
 from QueryMind.core.evaluation import EvaluationReport, EvaluationResult
+from QueryMind.core.evaluation.failure_attribution import enrich_failure_attribution
+from QueryMind.core.evaluation.metrics import enrich_result_metrics
 
 try:  # noqa: E402
     from .resume_store import EvaluationRunStore
@@ -23,6 +25,9 @@ def load_deduplicated_results(store: EvaluationRunStore) -> List[EvaluationResul
 
 def build_report_from_store(store: EvaluationRunStore) -> EvaluationReport:
     results = load_deduplicated_results(store)
+    for result in results:
+        enrich_result_metrics(result)
+        enrich_failure_attribution(result)
     completed_ids = [result.test_case.id for result in results]
     checkpoint = store.checkpoint
     report = EvaluationReport(
@@ -55,5 +60,6 @@ def save_report_artifacts(store: EvaluationRunStore, output_dir: Path) -> Evalua
     report.save_json(output_dir / "evaluation_report.json")
     report.save_csv(output_dir / "evaluation_report.csv")
     report.save_markdown(output_dir / "evaluation_report.md")
+    report.save_detailed_markdown(output_dir / "evaluation_detailed.md")
     report.save_html(output_dir / "evaluation_report.html")
     return report

@@ -116,6 +116,14 @@ class ToolRejection(BaseModel):
     reason: str = Field(
         description="Explanation of why the tool execution was rejected"
     )
+    stage: Optional[str] = Field(
+        default=None,
+        description="Stable rejection stage for audit and evaluation attribution",
+    )
+    code: Optional[str] = Field(
+        default=None,
+        description="Stable machine-readable rejection code",
+    )
 
 
 # Resolve forward references eagerly so runtime ToolResult construction works

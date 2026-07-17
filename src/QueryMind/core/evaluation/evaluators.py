@@ -25,10 +25,18 @@ from .base import (
     Evaluator,
     JudgeInput,
     JudgeResult,
+    ResultComparisonPolicy,
     SqlExecutionArtifact,
     SqlTestCase,
 )
 from .runtime import EvaluationRuntimeResolver, NoOpAgentMemory
+from .metrics import (
+    compare_execution_artifacts,
+    evaluate_sql_contract,
+    fingerprint_dataframe,
+    sql_requires_order,
+)
+from .sanitization import redact_sensitive_text
 
 
 logger = logging.getLogger(__name__)
@@ -268,6 +276,7 @@ async def _execute_sql(
     *,
     allow_write_sql: bool,
     preview_rows: int,
+    comparison_policy: Optional[ResultComparisonPolicy] = None,
 ) -> SqlExecutionArtifact:
     start = time.perf_counter()
 
@@ -289,6 +298,20 @@ async def _execute_sql(
         preview, preview_column_names, row_count, truncated = _normalize_rows(
             df, preview_rows
         )
+        fingerprints = fingerprint_dataframe(df)
+        comparison_fingerprints = fingerprint_dataframe(
+            df,
+            numeric_decimal_places=(
+                comparison_policy.numeric_decimal_places
+                if comparison_policy is not None
+                else None
+            ),
+            value_aliases=(
+                comparison_policy.value_aliases
+                if comparison_policy is not None
+                else None
+            ),
+        )
         return SqlExecutionArtifact(
             sql_text=sql_text,
             success=True,
@@ -300,12 +323,19 @@ async def _execute_sql(
             execution_time_ms=(time.perf_counter() - start) * 1000,
             sql_features=_sql_features(sql_text),
             dialect=test_case.dialect,
+            comparison_ordered_result_fingerprint=comparison_fingerprints[
+                "ordered_result_fingerprint"
+            ],
+            comparison_unordered_result_fingerprint=comparison_fingerprints[
+                "unordered_result_fingerprint"
+            ],
+            **fingerprints,
         )
     except Exception as exc:
         return SqlExecutionArtifact(
             sql_text=sql_text,
             success=False,
-            error_message=str(exc),
+            error_message=redact_sensitive_text(str(exc)),
             execution_time_ms=(time.perf_counter() - start) * 1000,
             sql_features=_sql_features(sql_text),
             dialect=test_case.dialect,
@@ -407,6 +437,7 @@ class SqlAccuracyEvaluator(Evaluator):
             test_case.ground_truth_sql,
             allow_write_sql=self.allow_write_sql,
             preview_rows=self.preview_rows,
+            comparison_policy=test_case.result_comparison,
         )
         agent_artifact = await _execute_sql(
             runtime,
@@ -414,7 +445,101 @@ class SqlAccuracyEvaluator(Evaluator):
             agent_sql,
             allow_write_sql=self.allow_write_sql,
             preview_rows=self.preview_rows,
+            comparison_policy=test_case.result_comparison,
         )
+        order_sensitive = sql_requires_order(
+            test_case.ground_truth_sql,
+            test_case.dialect,
+        )
+        comparison = compare_execution_artifacts(
+            agent_artifact,
+            ground_truth_artifact,
+            order_sensitive=order_sensitive,
+        )
+        business_order_sensitive = (
+            test_case.result_comparison.order_sensitive
+            if test_case.result_comparison.order_sensitive is not None
+            else order_sensitive
+        )
+        business_comparison = compare_execution_artifacts(
+            agent_artifact,
+            ground_truth_artifact,
+            order_sensitive=business_order_sensitive,
+            use_comparison_fingerprints=True,
+            compare_column_names=test_case.result_comparison.compare_column_names,
+        )
+        contract_metrics = evaluate_sql_contract(
+            agent_sql,
+            test_case.expected_sql_contract,
+            dialect=test_case.dialect,
+        )
+
+        first_sql_artifact = agent_artifact
+        run_sql_calls = agent_result.get_tool_calls("run_sql")
+        first_sql = None
+        if run_sql_calls:
+            raw_first_sql = run_sql_calls[0].arguments.get("sql")
+            if isinstance(raw_first_sql, str) and raw_first_sql.strip():
+                first_sql = raw_first_sql.strip()
+        if first_sql and first_sql != agent_sql:
+            first_sql_artifact = await _execute_sql(
+                runtime,
+                test_case,
+                first_sql,
+                allow_write_sql=self.allow_write_sql,
+                preview_rows=self.preview_rows,
+                comparison_policy=test_case.result_comparison,
+            )
+        first_comparison = compare_execution_artifacts(
+            first_sql_artifact,
+            ground_truth_artifact,
+            order_sensitive=order_sensitive,
+        )
+        first_business_comparison = compare_execution_artifacts(
+            first_sql_artifact,
+            ground_truth_artifact,
+            order_sensitive=business_order_sensitive,
+            use_comparison_fingerprints=True,
+            compare_column_names=test_case.result_comparison.compare_column_names,
+        )
+        first_contract_metrics = evaluate_sql_contract(
+            first_sql or agent_sql,
+            test_case.expected_sql_contract,
+            dialect=test_case.dialect,
+        )
+        contract_passed = bool(contract_metrics["sql_contract_passed"])
+        first_trace_success = (
+            run_sql_calls[0].success if run_sql_calls else None
+        )
+        evaluation_metrics = {
+            **comparison,
+            "first_sql_execution_success": (
+                bool(first_trace_success)
+                if first_trace_success is not None
+                else bool(first_sql_artifact.success)
+            ),
+            "first_sql_result_correct": bool(first_comparison["result_correct"]),
+            "business_result_correct": bool(
+                business_comparison["result_correct"] and contract_passed
+            ),
+            "verified_result_correct": bool(
+                comparison["result_correct"] and contract_passed
+            ),
+            "first_sql_business_result_correct": bool(
+                first_business_comparison["result_correct"]
+                and first_contract_metrics["sql_contract_passed"]
+            ),
+            "result_comparison_policy": test_case.result_comparison.model_dump(
+                mode="json"
+            ),
+            **contract_metrics,
+            "first_sql_contract_passed": bool(
+                first_contract_metrics["sql_contract_passed"]
+            ),
+            "first_sql_contract_violations": list(
+                first_contract_metrics["sql_contract_violations"]
+            ),
+        }
 
         if not ground_truth_artifact.success:
             return EvaluationResult(
@@ -427,7 +552,7 @@ class SqlAccuracyEvaluator(Evaluator):
                 reason=f"Ground truth SQL failed to execute: {ground_truth_artifact.error_message}",
                 issue_tags=["ground_truth_failure"],
                 execution_time_ms=agent_result.execution_time_ms,
-                metadata={"failure_type": "ground_truth_failure"},
+                metadata={"failure_type": "ground_truth_failure", **evaluation_metrics},
             )
 
         if not agent_artifact.success:
@@ -441,7 +566,7 @@ class SqlAccuracyEvaluator(Evaluator):
                 reason=f"Agent SQL failed to execute: {agent_artifact.error_message}",
                 issue_tags=["execution_error"],
                 execution_time_ms=agent_result.execution_time_ms,
-                metadata={"failure_type": "execution_error"},
+                metadata={"failure_type": "execution_error", **evaluation_metrics},
             )
 
         judge_input = JudgeInput(
@@ -467,7 +592,48 @@ class SqlAccuracyEvaluator(Evaluator):
             trace_summary=_build_trace_summary(agent_result),
         )
 
-        judge_result = await self._run_judge(judge_input)
+        if not contract_passed:
+            judge_result = JudgeResult(
+                passed=False,
+                score=0.5,
+                reason=(
+                    "Generated SQL violated the dataset SQL contract: "
+                    + ", ".join(contract_metrics["sql_contract_violations"])
+                ),
+                issue_tags=["wrong_semantics"],
+                confidence=1.0,
+                parse_source="deterministic_contract",
+                parsed_output={
+                    "sql_contract_violations": contract_metrics[
+                        "sql_contract_violations"
+                    ]
+                },
+            )
+        elif comparison["result_correct"]:
+            judge_result = JudgeResult(
+                passed=True,
+                score=1.0,
+                reason="Full result fingerprint matched the ground truth result.",
+                issue_tags=[],
+                confidence=1.0,
+                parse_source="deterministic",
+                parsed_output={"deterministic_match": True},
+            )
+        elif business_comparison["result_correct"]:
+            judge_result = JudgeResult(
+                passed=True,
+                score=0.95,
+                reason=(
+                    "The full result matched the dataset comparison policy "
+                    "after deterministic normalization."
+                ),
+                issue_tags=["formatting_only"],
+                confidence=1.0,
+                parse_source="deterministic_policy",
+                parsed_output={"deterministic_policy_match": True},
+            )
+        else:
+            judge_result = await self._run_judge(judge_input)
         if judge_result.parse_source == "failed":
             fallback_result = self._fallback_judge_from_artifacts(
                 test_case,
@@ -503,6 +669,7 @@ class SqlAccuracyEvaluator(Evaluator):
                 "run_sql_calls": len(agent_result.get_tool_calls("run_sql")),
                 "judge_parse_source": judge_result.parse_source,
                 "judge_execution_time_ms": judge_result.execution_time_ms,
+                **evaluation_metrics,
             },
         )
 
@@ -531,20 +698,22 @@ class SqlAccuracyEvaluator(Evaluator):
             response = await self.judge_llm.send_request(request)
         except Exception as exc:
             execution_time_ms = (time.perf_counter() - start) * 1000
+            safe_error = redact_sensitive_text(str(exc))
             logger.warning(
                 "Judge LLM request failed for test_case=%s after retries: %s",
                 judge_input.trace_summary.get("test_case_id", judge_input.database_id),
-                exc,
+                safe_error,
             )
             return JudgeResult(
                 passed=False,
                 score=0.0,
-                reason=f"Judge request failed after retries: {exc}",
+                reason=f"Judge request failed after retries: {safe_error}",
                 issue_tags=["judge_request_failed"],
                 confidence=0.0,
                 execution_time_ms=execution_time_ms,
                 raw_output="",
-                parsed_output={"error": str(exc)},
+                parsed_output={"error": safe_error},
+                token_usage={},
             )
 
         raw_output = response.content or ""
@@ -568,6 +737,7 @@ class SqlAccuracyEvaluator(Evaluator):
                 raw_output=raw_output,
                 parsed_output={},
                 parse_source="failed",
+                token_usage=dict(response.usage or {}),
             )
 
         execution_time_ms = (time.perf_counter() - start) * 1000
@@ -592,6 +762,7 @@ class SqlAccuracyEvaluator(Evaluator):
             raw_output=raw_output,
             parsed_output=parsed,
             parse_source=parse_source,
+            token_usage=dict(response.usage or {}),
         )
 
     def _fallback_judge_from_artifacts(

@@ -104,6 +104,19 @@ class OpenAILlmService(LlmService):
                     "total_tokens": getattr(resp.usage, "total_tokens", 0),
                 }.items()
             }
+            for field_name in (
+                "prompt_cache_hit_tokens",
+                "prompt_cache_miss_tokens",
+            ):
+                field_value = getattr(resp.usage, field_name, None)
+                if field_value is not None:
+                    usage[field_name] = int(field_value)
+            completion_details = getattr(
+                resp.usage, "completion_tokens_details", None
+            )
+            reasoning_tokens = getattr(completion_details, "reasoning_tokens", 0)
+            if reasoning_tokens:
+                usage["reasoning_tokens"] = int(reasoning_tokens)
 
         return LlmResponse(
             content=content,

@@ -29,6 +29,40 @@ class ExpectedOutcome(BaseModel):
     max_execution_time_ms: Optional[int] = None
 
 
+class ExpectedSchema(BaseModel):
+    """Schema contract used to measure retrieval recall."""
+
+    tables: List[str] = Field(default_factory=list)
+    columns: Dict[str, List[str]] = Field(default_factory=dict)
+
+
+class ResultComparisonPolicy(BaseModel):
+    """Dataset-owned rules for comparing two valid business result sets.
+
+    The policy is deliberately schema-agnostic. Every imported dataset may
+    choose its own numeric precision and ordering contract without changing
+    evaluator code or leaking ground-truth tables into the runtime agent.
+    """
+
+    numeric_decimal_places: Optional[int] = Field(default=None, ge=0, le=12)
+    order_sensitive: Optional[bool] = None
+    compare_column_names: bool = False
+    value_aliases: Dict[str, List[str]] = Field(default_factory=dict)
+
+
+class ExpectedSqlContract(BaseModel):
+    """Dataset-owned structural requirements checked against generated SQL."""
+
+    required_features: List[str] = Field(default_factory=list)
+    forbidden_features: List[str] = Field(default_factory=list)
+    required_columns: List[str] = Field(default_factory=list)
+    forbidden_columns: List[str] = Field(default_factory=list)
+    required_filter_columns: List[str] = Field(default_factory=list)
+    required_projection_aliases: List[str] = Field(default_factory=list)
+    min_projection_count: Optional[int] = Field(default=None, ge=1)
+    max_projection_count: Optional[int] = Field(default=None, ge=1)
+
+
 class SqlTestCase(BaseModel):
     """A single SQL evaluation test case."""
 
@@ -48,6 +82,11 @@ class SqlTestCase(BaseModel):
     difficulty: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
     expected_outcome: Optional[ExpectedOutcome] = None
+    expected_schema: Optional[ExpectedSchema] = None
+    result_comparison: ResultComparisonPolicy = Field(
+        default_factory=ResultComparisonPolicy
+    )
+    expected_sql_contract: Optional[ExpectedSqlContract] = None
 
     def build_user(self, default_user: Optional[User] = None) -> User:
         """Build a QueryMind user for this test case."""
@@ -79,6 +118,7 @@ class SqlTestCase(BaseModel):
             "category": str(metadata.get("category") or "unspecified"),
             "source": str(metadata.get("source") or "unspecified"),
             "query_language": str(metadata.get("query_language") or "unspecified"),
+            "business_domain": str(metadata.get("business_domain") or "unspecified"),
         }
 
 
@@ -104,6 +144,7 @@ class AgentResult(BaseModel):
     tool_calls: List[ToolInvocationRecord] = Field(default_factory=list)
     execution_time_ms: float = 0.0
     error: Optional[str] = None
+    token_usage: Dict[str, int] = Field(default_factory=dict)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
     def get_tool_calls(self, tool_name: Optional[str] = None) -> List[ToolInvocationRecord]:
@@ -136,6 +177,11 @@ class SqlExecutionArtifact(BaseModel):
     execution_time_ms: float = 0.0
     sql_features: List[str] = Field(default_factory=list)
     dialect: Optional[str] = None
+    ordered_result_fingerprint: Optional[str] = None
+    unordered_result_fingerprint: Optional[str] = None
+    comparison_ordered_result_fingerprint: Optional[str] = None
+    comparison_unordered_result_fingerprint: Optional[str] = None
+    column_fingerprint: Optional[str] = None
 
 
 class JudgeInput(BaseModel):
@@ -172,6 +218,7 @@ class JudgeResult(BaseModel):
     raw_output: str = ""
     parsed_output: Dict[str, Any] = Field(default_factory=dict)
     parse_source: Optional[str] = None
+    token_usage: Dict[str, int] = Field(default_factory=dict)
 
 
 class EvaluationResult(BaseModel):

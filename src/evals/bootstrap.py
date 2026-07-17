@@ -32,8 +32,8 @@ from QueryMind.integrations.llmservice import AnthropicLlmService, OpenAILlmServ
 
 
 def load_environment() -> None:
-    """Load the repo-local .env file."""
-    load_dotenv(REPO_ROOT / ".env", override=True)
+    """Load repo defaults without replacing explicit run configuration."""
+    load_dotenv(REPO_ROOT / ".env", override=False)
 
 
 def resolve_env_path(name: str, default: Path) -> Path:
@@ -54,6 +54,14 @@ def should_show_progress() -> bool:
     if mode in {"1", "true", "on", "yes", "enable", "enabled"}:
         return True
     return sys.stderr.isatty() or sys.stdout.isatty()
+
+
+def resolve_agent_temperature() -> float:
+    """Resolve deterministic Text2SQL sampling with explicit validation."""
+    value = float(os.getenv("EVAL_AGENT_TEMPERATURE", "0.0"))
+    if not 0.0 <= value <= 2.0:
+        raise ValueError("EVAL_AGENT_TEMPERATURE must be between 0.0 and 2.0")
+    return value
 
 
 class TqdmProgressReporter:
@@ -325,6 +333,10 @@ def build_runtime_from_env(provider: str | None = None) -> EvaluationRuntime:
         provider=provider,
     )
     max_tool_iterations = int(os.getenv("EVAL_MAX_TOOL_ITERATIONS", "25"))
+    max_metadata_query_retries = int(
+        os.getenv("EVAL_MAX_METADATA_QUERY_RETRIES", "2")
+    )
+    agent_temperature = resolve_agent_temperature()
     business_schemas = ["person", "humanresources", "production", "purchasing", "sales"]
 
     neo4j_config = Neo4jConfig.from_env()
@@ -409,6 +421,8 @@ def build_runtime_from_env(provider: str | None = None) -> EvaluationRuntime:
         allow_write_sql=os.getenv("EVAL_ALLOW_WRITE_SQL", "false").lower() == "true",
     )
     runtime.agent_config.max_tool_iterations = max_tool_iterations
+    runtime.agent_config.max_metadata_query_retries = max_metadata_query_retries
+    runtime.agent_config.temperature = agent_temperature
     return runtime
 
 

@@ -27,6 +27,16 @@ DEFAULT_SQL_GOVERNANCE_PROMPT = """
 
 - Avoid metadata introspection queries unless they are explicitly allowed.
 - Keep the current row grain stable and move to `run_sql` once the table path is clear.
+- Before `run_sql`, verify the query contract: metric expression, row grain,
+  filters, time field, join path, output columns, and ordering.
+- Use only fields supported by retrieved schema descriptions. If two fields
+  could represent the requested business metric, ask for clarification rather
+  than silently choosing one.
+- Project only the requested dimensions and metrics. Do not add helper IDs,
+  diagnostic columns, rounding, casts, or filters unless the user requested
+  them or the retrieved business definition requires them.
+- Keep ordered output deterministic with stable tie-breakers from the requested
+  dimensions.
 """
 
 DEFAULT_SQL_GOVERNANCE_RECAP = """
@@ -726,6 +736,10 @@ def build_sql_governance_prompt_block(
         "",
         "- Avoid metadata introspection queries unless they are explicitly allowed.",
         "- Keep the current row grain stable and call `run_sql` once the table path is clear.",
+        "- Verify the query contract before execution: metric expression, row grain, filters, time field, join path, output columns, and ordering.",
+        "- Do not substitute similarly named amount, date, status, or identifier fields without schema evidence.",
+        "- Return only requested dimensions and metrics; do not add helper IDs, rounding, casts, or unsupported filters.",
+        "- Preserve numeric precision and add stable tie-breakers when ordered rows can tie.",
     ]
     if repair_strategy == "structural_rewrite":
         prompt_parts.extend(
@@ -981,6 +995,16 @@ def build_sql_governance_recap_block(
     """Render a short recap message for a repeated SQL attempt."""
     if sql_exploration_frozen:
         return ""
+    if bool((last_sql_shape or {}).get("metadata_query")):
+        return "\n".join(
+            [
+                "## SQL Self-Check Reminder",
+                "The metadata SQL path is blocked. Do not retry information_schema, "
+                "pg_catalog, or equivalent metadata SQL with run_sql. Use "
+                "schema_retrieve with required_fields / graph expansion; if the "
+                "business meaning is still ambiguous, ask the user to clarify it.",
+            ]
+        )
     missing = _dedupe_preserve_order(missing_categories)
     positive_recap = _build_sql_governance_positive_recap(
         sql_family=sql_family,

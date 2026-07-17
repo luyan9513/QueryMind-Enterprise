@@ -195,12 +195,19 @@ class ToolRegistry:
                     reason=msg,
                 )
 
+            metadata = dict(base_metadata)
+            metadata.update(
+                {
+                    "rejection_stage": "permission",
+                    "rejection_code": "insufficient_group_access",
+                }
+            )
             return ToolResult(
                 success=False,
                 result_for_llm=msg,
                 ui_component=None,
                 error=msg,
-                metadata=dict(base_metadata),
+                metadata=metadata,
             )
 
         # Validate and parse arguments
@@ -226,12 +233,17 @@ class ToolRegistry:
         )
 
         if isinstance(transform_result, ToolRejection):
+            metadata = dict(base_metadata)
+            if transform_result.stage:
+                metadata["rejection_stage"] = transform_result.stage
+            if transform_result.code:
+                metadata["rejection_code"] = transform_result.code
             return ToolResult(
                 success=False,
                 result_for_llm=transform_result.reason,
                 ui_component=None,
                 error=transform_result.reason,
-                metadata=dict(base_metadata),
+                metadata=metadata,
             )
 
         # Use transformed arguments for execution

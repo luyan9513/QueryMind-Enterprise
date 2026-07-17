@@ -18,6 +18,8 @@ load_repo_env()
 CONVERSATIONS_DIR = resolve_data_dir("QUERYMIND_CONVERSATIONS_DIR", "conversations")
 QUERY_RESULTS_DIR = resolve_data_dir("QUERYMIND_QUERY_RESULTS_DIR", "query_results")
 MAX_TOOL_ITERATIONS = int(os.getenv("MAX_TOOL_ITERATIONS", "25"))
+AGENT_TEMPERATURE = float(os.getenv("AGENT_TEMPERATURE", "0.0"))
+MAX_METADATA_QUERY_RETRIES = int(os.getenv("MAX_METADATA_QUERY_RETRIES", "2"))
 
 from QueryMind.core import Agent, AgentConfig, ToolRegistry  # noqa: E402
 from QueryMind.core.agent import (  # noqa: E402
@@ -247,6 +249,8 @@ def build_agent() -> Agent:
 
     agent_config = AgentConfig(
         max_tool_iterations=MAX_TOOL_ITERATIONS,
+        temperature=AGENT_TEMPERATURE,
+        max_metadata_query_retries=MAX_METADATA_QUERY_RETRIES,
         schema_search_default_threshold=0.4,
     )
 

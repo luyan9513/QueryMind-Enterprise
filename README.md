@@ -13,7 +13,8 @@ This fork is maintained by [luyan9513](https://github.com/luyan9513) as an enter
 - DeepSeek for the main agent, with SiliconFlow-backed Mem0 LLM and `BAAI/bge-m3` embeddings.
 - Read-only PostgreSQL PK/FK extraction through `pg_catalog`, including composite and cross-schema relationships.
 - Persistent LLM-generated conversation titles, automatic history refresh, workflow message storage, and graceful fallback.
-- AdventureWorks validation across 68 tables and 456 fields, with 117 Python tests passing.
+- A 24-case Chinese AdventureWorks business benchmark with deterministic full-result checks, Schema Recall, first-attempt metrics, failure attribution, trace redaction, and an interactive HTML report.
+- AdventureWorks validation across 68 tables and 456 fields, with 128 Python tests passing.
 
 See [Portfolio Ownership and Evidence](docs/portfolio/ownership.md) for the upstream boundary, personal contributions, verification evidence, and roadmap.
 
@@ -212,6 +213,28 @@ python my_agent.py
 python webcomponent_demo.py --api-base http://127.0.0.1:8000
 ```
 
+### v0.2 Text2SQL Evaluation
+
+The upstream project already provided the evaluation runner, resumable batch CLI, SQL executor, LLM judge, and basic/expansion datasets. This portfolio fork extends that foundation with a Chinese business benchmark and deterministic enterprise metrics.
+
+```bash
+cd /Users/luyan/Documents/Projects/01-QueryMind/repo/QueryMind-personal
+EVAL_DATASET_PATH=evals/datasets/adventureworks_business_zh.yaml \
+  .venv/bin/python my_evaluation.py
+```
+
+The report now includes Schema Recall before the first SQL attempt, SQL execution success, full-result correctness, first-SQL correctness, tool-call count, P95 latency, token usage, optional provider-price snapshots, and primary/secondary failure categories. Exported JSON omits result previews and raw judge output. Configure prices only after checking the provider's current official pricing; leaving any role's price incomplete makes its cost display `N/A`.
+
+The 24 reference SQL statements passed a local PostgreSQL read-only execution check. The archived DeepSeek v4 Flash baseline completed all 24 cases: final SQL execution success was 100.00%, strict full-result correctness was 29.17%, first-SQL strict correctness was 8.33%, and Schema Recall was 62.50%. The upstream LLM Judge pass rate was 75.00%, but it accepted 11 cases rejected by deterministic full-result comparison, so the project treats 29.17% as the baseline accuracy signal and keeps Judge pass rate as a separate diagnostic metric.
+
+### v0.2.1 Accuracy and Recovery Iteration
+
+The next iteration adds explicit result-comparison policies, SQL output contracts, offline rescoring, one-hop FK expansion for hybrid schema retrieval, a database-agnostic query-contract prompt, configurable agent temperature, and deterministic recovery from repeated rejected metadata queries. Ground-truth SQL and benchmark contracts remain evaluator-only and are not injected into the runtime agent.
+
+Five real-model experiments were retained, including regressions and one interrupted low-temperature run. The final DeepSeek v4 Pro run completed 24/24 cases with 100.00% final SQL execution, 37.50% strict result correctness, 54.17% business-equivalent correctness, 33.33% first-SQL strict correctness, 75.00% Schema Recall, and 3.88 average tool calls. Compared with the Flash baseline, strict correctness increased by 8.33 percentage points and average tool calls fell by 49.5%, while estimated model cost rose from USD 0.064537 to USD 0.145265 (about 2.25x).
+
+These figures apply only to the frozen 24-case AdventureWorks benchmark and the recorded model configuration. They are not a guarantee for arbitrary databases. New data sources require their own schema initialization, business definitions, frozen benchmark, and baseline. The latest formal Python test scope is `142 passed, 1 warning`.
+
 ### Web Component
 
 ```html
@@ -235,7 +258,7 @@ The handbook expands the README into components, advanced-features, use-case, an
 
 ### Ongoing
 
-1. Iterate on the AdventureWorks micro-benchmark by analyzing tool-call chains, prompt injection patterns, and common SQL failure modes.
+1. Generalize the metadata-loop breaker into a failure analyzer that routes schema, join, aggregation, output-contract, permission, and provider failures to explicit recovery strategies. Validate the same generic logic on a second data source with its own frozen benchmark.
 
 <figure>
   <img src="docs/figures/use-cases/eval-driven%20iterations.png" alt="Eval-driven iterations" />

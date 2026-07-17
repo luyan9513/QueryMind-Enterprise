@@ -400,12 +400,20 @@ class RLSToolRegistry(ToolRegistry):
         if injection_reason:
             if self.config.get("audit", {}).get("log_rejected_queries", True):
                 logger.warning(f"SQL injection rejected for user {user.id}: {injection_reason}")
-            return ToolRejection(reason=f"SQL rejected: {injection_reason}")
+            return ToolRejection(
+                reason=f"SQL rejected: {injection_reason}",
+                stage="injection",
+                code="sql_injection",
+            )
         
         # 2. Query Complexity Validation
         complexity_reason = self._validate_query_complexity(sql)
         if complexity_reason:
-            return ToolRejection(reason=f"Query rejected: {complexity_reason}")
+            return ToolRejection(
+                reason=f"Query rejected: {complexity_reason}",
+                stage="complexity",
+                code="query_complexity",
+            )
 
         # 3. SQL Semantics Validation
         semantics_reason = sql_semantics_rejection_reason(
@@ -420,7 +428,11 @@ class RLSToolRegistry(ToolRegistry):
                 logger.warning(
                     f"SQL semantics rejected for user {user.id}: {semantics_reason}"
                 )
-            return ToolRejection(reason=f"SQL rejected: {semantics_reason}")
+            return ToolRejection(
+                reason=f"SQL rejected: {semantics_reason}",
+                stage="semantics",
+                code="sql_semantics",
+            )
 
         # 4. Territory-Based RLS
         if self._should_apply_rls(sql):
@@ -450,7 +462,11 @@ class RLSToolRegistry(ToolRegistry):
                 logger.warning(
                     f"SQL governance rejected for user {user.id}: {governance_reason}"
                 )
-            return ToolRejection(reason=f"SQL rejected: {governance_reason}")
+            return ToolRejection(
+                reason=f"SQL rejected: {governance_reason}",
+                stage="governance",
+                code="sql_governance",
+            )
 
         freeze_reason = sql_skeleton_freeze_rejection_reason(
             sql,
@@ -462,7 +478,11 @@ class RLSToolRegistry(ToolRegistry):
                 logger.warning(
                     f"SQL frozen skeleton rejected for user {user.id}: {freeze_reason}"
                 )
-            return ToolRejection(reason=f"SQL rejected: {freeze_reason}")
+            return ToolRejection(
+                reason=f"SQL rejected: {freeze_reason}",
+                stage="freeze",
+                code="sql_skeleton_freeze",
+            )
 
         return args
 

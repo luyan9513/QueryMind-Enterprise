@@ -91,6 +91,36 @@ def test_sql_governance_profile_inference_covers_set_operation_and_time_series()
     assert "time_series" in profile.categories
 
 
+def test_runtime_chinese_query_does_not_create_untested_hard_requirements() -> None:
+    profile = build_sql_governance_profile(
+        tags=[],
+        query="各区域累计订单金额",
+        source="runtime",
+    )
+
+    # Chinese interpretation remains in the LLM query-contract prompt. Regex
+    # categories are hard rejection rules, so an untranslated runtime query
+    # must not create requirements that can trap the agent in repair loops.
+    assert profile.categories == []
+
+
+def test_sql_governance_recap_stops_repeated_metadata_sql() -> None:
+    recap = build_sql_governance_recap_block(
+        build_sql_governance_profile(
+            tags=[],
+            query="find customer tables",
+            source="runtime",
+        ),
+        [],
+        last_sql_shape={"metadata_query": True},
+        last_sql_text="SELECT * FROM information_schema.columns",
+    )
+
+    assert "Do not retry" in recap
+    assert "schema_retrieve" in recap
+    assert "ask the user" in recap
+
+
 def test_sql_governance_profile_inference_covers_detail_expression_tags() -> None:
     profile = build_sql_governance_profile(
         tags=["case_when", "null_handling", "comparison", "distinct"],
@@ -1355,6 +1385,8 @@ def test_rls_registry_rejects_metadata_introspection_via_transform_args() -> Non
 
     assert isinstance(result, ToolRejection)
     assert "Metadata introspection" in result.reason
+    assert result.stage == "governance"
+    assert result.code == "sql_governance"
 
 
 def test_rls_registry_rejects_semantic_drift_via_transform_args() -> None:
@@ -1385,6 +1417,7 @@ def test_rls_registry_rejects_semantic_drift_via_transform_args() -> None:
 
     assert isinstance(result, ToolRejection)
     assert "navigation" in result.reason.lower()
+    assert result.stage == "semantics"
 
 
 def test_rls_registry_rejects_drift_after_sql_skeleton_freeze() -> None:
@@ -1467,3 +1500,5 @@ def test_rls_registry_rejects_drift_after_sql_skeleton_freeze() -> None:
 
     assert isinstance(result, ToolRejection)
     assert "frozen" in result.reason.lower()
+    assert result.stage == "freeze"
+    assert result.code == "sql_skeleton_freeze"

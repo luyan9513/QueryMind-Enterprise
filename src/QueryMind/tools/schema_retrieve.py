@@ -7,6 +7,7 @@ graph, expand) determined by LLM agentic decision-making.
 """
 
 import logging
+import os
 from typing import List, Optional, Type, Dict, Any
 
 from pydantic import BaseModel, Field
@@ -184,13 +185,27 @@ class SchemaRetrieveTool(Tool[SchemaRetrieveToolArgs]):
         >>> result = await tool.execute(context, args)
     """
 
-    def __init__(self, schema_memory: SchemaMemory):
+    def __init__(
+        self,
+        schema_memory: SchemaMemory,
+        *,
+        max_initial_results: Optional[int] = None,
+    ):
         """Initialize the tool with a SchemaMemory instance.
 
         Args:
             schema_memory: SchemaMemory implementation for schema retrieval
         """
         self._schema_memory = schema_memory
+        configured_limit = max_initial_results
+        if configured_limit is None:
+            try:
+                configured_limit = int(
+                    os.getenv("SCHEMA_RETRIEVE_MAX_INITIAL_RESULTS", "12")
+                )
+            except ValueError:
+                configured_limit = 12
+        self._max_initial_results = max(1, min(50, configured_limit))
 
     @property
     def name(self) -> str:
@@ -278,6 +293,14 @@ Search for table schemas based on business semantics. Supports multiple search m
             if args.graph_hint == GraphHint.EXPAND or search_mode == SearchMode.EXPAND:
                 effective_search_mode = SearchMode.EXPAND
 
+            requested_limit = args.limit
+            effective_limit = requested_limit
+            if (
+                not seed_table_refs
+                and effective_search_mode in {SearchMode.HYBRID, SearchMode.VECTOR}
+            ):
+                effective_limit = min(requested_limit, self._max_initial_results)
+
             memory_search_mode = SCHEMA_MEMORY_SEARCH_MODE_MAP.get(
                 effective_search_mode,
                 "hybrid",
@@ -285,7 +308,8 @@ Search for table schemas based on business semantics. Supports multiple search m
 
             logger.info(
                 f"Schema retrieval: query='{args.query}', mode={effective_search_mode.value}, "
-                f"hint={args.graph_hint.value}, limit={args.limit}"
+                f"hint={args.graph_hint.value}, limit={effective_limit} "
+                f"(requested={requested_limit})"
             )
 
             # Perform schema search
@@ -293,7 +317,7 @@ Search for table schemas based on business semantics. Supports multiple search m
                 query=args.query,
                 context=context,
                 search_mode=memory_search_mode,
-                limit=args.limit,
+                limit=effective_limit,
                 similarity_threshold=args.similarity_threshold,
                 domain_filter=args.domain_filter,
                 required_fields=required_fields or None,
@@ -338,6 +362,8 @@ Search for table schemas based on business semantics. Supports multiple search m
                 "graph_hint": args.graph_hint.value,
                 "query": args.query,
                 "total_results": len(results),
+                "requested_limit": requested_limit,
+                "effective_limit": effective_limit,
                 "selected_tables": selected_tables,
                 "selected_table_refs": selected_table_refs,
                 "domain_filter": args.domain_filter,
@@ -361,6 +387,8 @@ Search for table schemas based on business semantics. Supports multiple search m
                 "graph_hint": args.graph_hint.value,
                 "query": args.query,
                 "total_results": 0,
+                "requested_limit": args.limit,
+                "effective_limit": min(args.limit, self._max_initial_results),
                 "selected_tables": [],
                 "selected_table_refs": [],
                 "domain_filter": args.domain_filter,

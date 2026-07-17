@@ -12,8 +12,11 @@ from QueryMind.core.components import UiComponent
 
 from .base import AgentResult, EvaluationResult, Evaluator, SqlTestCase, ToolInvocationRecord
 from .dataset import EvaluationDataset
+from .failure_attribution import enrich_failure_attribution
+from .metrics import enrich_result_metrics, merge_token_usage
 from .report import EvaluationReport
 from .runtime import EvaluationRuntimeResolver
+from .sanitization import sanitize_trace_metadata, redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +141,9 @@ class EvaluationRunner:
             if error is None and trace_error is not None:
                 error = trace_error
 
-            tool_calls, final_answer = self._extract_trace(conversation)
+            tool_calls, final_answer, token_usage, llm_call_count = self._extract_trace(
+                conversation
+            )
 
             metadata = {
                 "component_count": len(components),
@@ -146,9 +151,10 @@ class EvaluationRunner:
                 if conversation
                 else 0,
                 "agent_run_time_ms": execution_time_ms,
+                "llm_call_count": llm_call_count,
             }
             if trace_error is not None:
-                metadata["trace_load_error"] = trace_error
+                metadata["trace_load_error"] = redact_sensitive_text(trace_error)
 
             agent_result = AgentResult(
                 test_case_id=test_case.id,
@@ -158,7 +164,8 @@ class EvaluationRunner:
                 final_answer=final_answer,
                 tool_calls=tool_calls,
                 execution_time_ms=execution_time_ms,
-                error=error,
+                error=redact_sensitive_text(error) if error else None,
+                token_usage=token_usage,
                 metadata=metadata,
             )
 
@@ -175,12 +182,13 @@ class EvaluationRunner:
                         evaluator.name,
                         test_case.id,
                     )
+                    safe_error = redact_sensitive_text(str(exc))
                     result = EvaluationResult(
                         test_case=test_case,
                         agent_result=agent_result,
                         score=0.0,
                         passed=False,
-                        reason=f"Evaluator {evaluator.name} failed: {exc}",
+                        reason=f"Evaluator {evaluator.name} failed: {safe_error}",
                         issue_tags=["evaluator_error"],
                         execution_time_ms=agent_result.execution_time_ms,
                         metadata={
@@ -224,6 +232,8 @@ class EvaluationRunner:
                 }
                 for evaluator, result in zip(self.evaluators, eval_results)
             ]
+            enrich_result_metrics(canonical)
+            enrich_failure_attribution(canonical)
 
             if self.result_callback is not None:
                 result_value = self.result_callback(canonical)
@@ -234,33 +244,50 @@ class EvaluationRunner:
 
     def _extract_trace(
         self, conversation: Any
-    ) -> tuple[List[ToolInvocationRecord], Optional[str]]:
+    ) -> tuple[List[ToolInvocationRecord], Optional[str], dict[str, int], int]:
         if not conversation:
-            return [], None
+            return [], None, {}, 0
 
-        tool_results: dict[str, str] = {}
+        tool_results: dict[str, Any] = {
+            message.tool_call_id: message
+            for message in conversation.messages
+            if message.role == "tool" and message.tool_call_id
+        }
         records: List[ToolInvocationRecord] = []
         final_answer: Optional[str] = None
+        usage_entries: List[dict[str, int]] = []
+        llm_call_count = 0
 
         for message in conversation.messages:
-            if message.role == "tool" and message.tool_call_id:
-                tool_results[message.tool_call_id] = message.content
-                continue
-
             if message.role != "assistant":
                 continue
 
+            usage = (message.metadata or {}).get("llm_usage")
+            if isinstance(usage, dict) and usage:
+                usage_entries.append(usage)
+                llm_call_count += 1
+
             if message.tool_calls:
                 for tool_call in message.tool_calls:
+                    tool_message = tool_results.get(tool_call.id)
+                    tool_metadata = sanitize_trace_metadata(
+                        getattr(tool_message, "metadata", {}) if tool_message else {}
+                    )
                     records.append(
                         ToolInvocationRecord(
                             tool_call_id=tool_call.id,
                             tool_name=tool_call.name,
                             arguments=dict(tool_call.arguments),
-                            result_text=tool_results.get(tool_call.id),
+                            result_text=(
+                                redact_sensitive_text(tool_message.content)
+                                if tool_message
+                                else None
+                            ),
+                            success=tool_metadata.get("tool_success"),
+                            metadata=tool_metadata,
                         )
                     )
             elif message.content.strip():
                 final_answer = message.content.strip()
 
-        return records, final_answer
+        return records, final_answer, merge_token_usage(usage_entries), llm_call_count

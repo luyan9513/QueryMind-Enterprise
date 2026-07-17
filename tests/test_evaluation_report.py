@@ -141,3 +141,105 @@ def test_average_execution_time_uses_agent_runtime(tmp_path: Path) -> None:
     html = output_path.read_text(encoding="utf-8")
 
     assert "Average Eval Agent Time" in html
+
+
+def test_enterprise_metrics_and_failure_filter_are_exported(tmp_path: Path) -> None:
+    result = _make_result(
+        test_case_id="case-enterprise",
+        passed=False,
+        agent_success=True,
+        score=0.5,
+        execution_time_ms=250.0,
+    )
+    result.metadata.update(
+        {
+            "schema_recall": 0.5,
+            "result_correct": False,
+            "first_sql_execution_success": True,
+            "first_sql_result_correct": False,
+            "tool_call_count": 3,
+            "primary_failure": "schema_recall_failure",
+            "secondary_failures": ["result_mismatch"],
+        }
+    )
+    result.agent_result.token_usage = {
+        "prompt_tokens": 1000,
+        "completion_tokens": 100,
+    }
+    report = EvaluationReport(
+        dataset_name="enterprise metrics",
+        results=[result],
+        metadata={
+            "config_snapshot": {
+                "pricing": {
+                    "agent": {
+                        "input_cache_hit_usd_per_million": 0.1,
+                        "input_cache_miss_usd_per_million": 1.0,
+                        "output_usd_per_million": 2.0,
+                    }
+                }
+            }
+        },
+    )
+
+    output_path = tmp_path / "enterprise.html"
+    report.save_html(output_path)
+    rendered = output_path.read_text(encoding="utf-8")
+
+    assert "Schema Recall" in rendered
+    assert "Evaluator Pass Rate" in rendered
+    assert "Strict Result Correct Rate" in rendered
+    assert "Evaluator Pass / Fail" in rendered
+    assert "First SQL Strict Correct" in rendered
+    assert "First SQL Correct Rate" in rendered
+    assert "Estimated Model Cost" in rendered
+    assert 'id="failure-filter"' in rendered
+    assert 'data-primary-failure="schema_recall_failure"' in rendered
+    assert "row.dataset.primaryFailure === primaryFailure" in rendered
+    assert report.metadata["enterprise_metrics"]["failure_distribution"] == {
+        "schema_recall_failure": 1
+    }
+    assert report.metadata["enterprise_metrics"]["secondary_failure_distribution"] == {
+        "result_mismatch": 1
+    }
+    assert "Recovered / Secondary Signals" in rendered
+
+
+def test_detailed_markdown_explains_accuracy_sql_and_failure(tmp_path: Path) -> None:
+    result = _make_result(
+        test_case_id="case-detail",
+        passed=False,
+        agent_success=True,
+        score=0.5,
+        execution_time_ms=1250.0,
+    )
+    result.test_case.query = "按区域统计销售额"
+    result.test_case.ground_truth_sql = "SELECT region, SUM(total) FROM orders GROUP BY region"
+    result.agent_artifact.sql_text = "SELECT region, SUM(subtotal) FROM orders GROUP BY region"
+    result.metadata.update(
+        {
+            "verified_result_correct": False,
+            "business_result_correct": False,
+            "sql_contract_passed": False,
+            "sql_contract_violations": ["missing_column:total"],
+            "schema_recall": 1.0,
+            "tool_call_count": 2,
+            "primary_failure": "query_contract_failure",
+        }
+    )
+    report = EvaluationReport(dataset_name="可读评测", results=[result])
+
+    output_path = tmp_path / "evaluation_detailed.md"
+    report.save_detailed_markdown(output_path)
+    rendered = output_path.read_text(encoding="utf-8")
+
+    assert "严格结果准确率：0.00%" in rendered
+    assert "用户问题：按区域统计销售额" in rendered
+    assert "参考 SQL" in rendered
+    assert "SUM(total)" in rendered
+    assert "Agent 最终 SQL" in rendered
+    assert "SUM(subtotal)" in rendered
+    assert "哪里错了" in rendered
+    assert "缺少必要字段：total" in rendered
+    assert "为什么错" in rendered
+    assert "建议怎么改" in rendered

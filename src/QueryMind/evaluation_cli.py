@@ -150,6 +150,30 @@ def build_evaluators(
     return evaluators
 
 
+def _pricing_snapshot(role: str, provider: str, model: object) -> dict[str, object] | None:
+    prefix = f"EVAL_{role.upper()}"
+    fields = {
+        "input_cache_hit_usd_per_million": os.getenv(
+            f"{prefix}_INPUT_CACHE_HIT_USD_PER_MILLION"
+        ),
+        "input_cache_miss_usd_per_million": os.getenv(
+            f"{prefix}_INPUT_CACHE_MISS_USD_PER_MILLION"
+        ),
+        "output_usd_per_million": os.getenv(
+            f"{prefix}_OUTPUT_USD_PER_MILLION"
+        ),
+    }
+    if not all(value not in (None, "") for value in fields.values()):
+        return None
+    return {
+        "provider": provider,
+        "model": str(model or "unknown"),
+        **{key: float(value) for key, value in fields.items()},
+        "source_url": os.getenv("EVAL_PRICE_SOURCE_URL", ""),
+        "checked_at": os.getenv("EVAL_PRICE_CHECKED_AT", ""),
+    }
+
+
 def _build_config_snapshot(
     *,
     dataset_path: Path,
@@ -166,6 +190,8 @@ def _build_config_snapshot(
     include_expected_outcome: bool,
 ) -> dict[str, object]:
     recovery = build_recovery_strategy()
+    agent_model = getattr(runtime.agent_llm_service, "model", None)
+    judge_model = getattr(judge_llm, "model", None)
     return {
         "dataset_path": str(dataset_path),
         "dataset_hash": dataset_hash_value,
@@ -173,10 +199,14 @@ def _build_config_snapshot(
         "dialect": runtime.dialect,
         "schema_sync_mode": runtime.schema_sync_mode,
         "allow_write_sql": allow_write_sql,
-        "agent_model": getattr(runtime.agent_llm_service, "model", None),
+        "agent_model": agent_model,
         "agent_provider": agent_provider,
+        "agent_temperature": runtime.agent_config.temperature,
         "max_tool_iterations": runtime.agent_config.max_tool_iterations,
-        "judge_model": getattr(judge_llm, "model", None),
+        "max_metadata_query_retries": (
+            runtime.agent_config.max_metadata_query_retries
+        ),
+        "judge_model": judge_model,
         "judge_provider": judge_provider,
         "pass_threshold": pass_threshold,
         "preview_rows": preview_rows,
@@ -184,6 +214,10 @@ def _build_config_snapshot(
         "evaluator_names": evaluator_names,
         "include_expected_outcome": include_expected_outcome,
         "evaluation_mode": "full" if include_expected_outcome else "sql_accuracy_only",
+        "pricing": {
+            "agent": _pricing_snapshot("agent", agent_provider, agent_model),
+            "judge": _pricing_snapshot("judge", judge_provider, judge_model),
+        },
         "recovery": {
             "max_retries": recovery.max_retries,
             "base_delay_ms": recovery.base_delay_ms,

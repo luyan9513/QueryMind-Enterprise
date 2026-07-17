@@ -10,9 +10,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from QueryMind.capabilities.agent_memory import AgentMemory  # noqa: E402
 from QueryMind.capabilities.sql_runner import RunSqlToolArgs  # noqa: E402
-from QueryMind.core.agent.agent import _compose_final_response_content  # noqa: E402
+from QueryMind.core.agent.agent import (  # noqa: E402
+    _append_metadata_recovery_prompt,
+    _compose_final_response_content,
+    _is_rejected_metadata_sql,
+    _metadata_recovery_tools,
+)
+from QueryMind.core.agent.config import AgentConfig  # noqa: E402
 from QueryMind.core.system_prompt.default import DefaultSystemPromptBuilder  # noqa: E402
-from QueryMind.core.tool import ToolContext  # noqa: E402
+from QueryMind.core.tool import ToolCall, ToolContext, ToolResult  # noqa: E402
 from QueryMind.core.tool import ToolSchema  # noqa: E402
 from QueryMind.core.user import User  # noqa: E402
 from QueryMind.runtime_paths import repo_root  # noqa: E402
@@ -175,4 +181,51 @@ def test_system_prompt_mentions_sql_fallback() -> None:
     )
 
     assert "append the executed SQL" in prompt
+    assert "Return exactly the dimensions and metrics" in prompt
+    assert "Preserve database numeric precision" in prompt
+    assert "Do not invent status" in prompt
     assert "Runtime context notices are authoritative" in prompt
+
+
+def test_metadata_query_recovery_is_narrow_and_schema_only() -> None:
+    rejected = ToolResult(
+        success=False,
+        result_for_llm="rejected",
+        error="rejected",
+        metadata={"rejection_stage": "governance"},
+    )
+    metadata_call = ToolCall(
+        id="call-1",
+        name="run_sql",
+        arguments={"sql": "SELECT * FROM information_schema.columns"},
+    )
+    business_call = metadata_call.model_copy(
+        update={"arguments": {"sql": "SELECT * FROM sales.orders"}}
+    )
+    tools = [
+        ToolSchema(name="run_sql", description="sql", parameters={}),
+        ToolSchema(name="schema_retrieve", description="schema", parameters={}),
+    ]
+
+    assert _is_rejected_metadata_sql(metadata_call, rejected) is True
+    assert _is_rejected_metadata_sql(business_call, rejected) is False
+    assert [tool.name for tool in _metadata_recovery_tools(tools)] == [
+        "schema_retrieve"
+    ]
+    prompt = _append_metadata_recovery_prompt("base")
+    assert "run_sql` is temporarily unavailable" in prompt
+    assert "required_fields" in prompt
+    exhausted_prompt = _append_metadata_recovery_prompt("base", exhausted=True)
+    assert "Do not call tools again" in exhausted_prompt
+    assert "ask the user" in exhausted_prompt
+
+
+def test_agent_metadata_retry_limit_is_bounded() -> None:
+    assert AgentConfig().max_metadata_query_retries == 2
+
+    try:
+        AgentConfig(max_metadata_query_retries=0)
+    except ValueError:
+        pass
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("zero metadata retry limit should fail validation")
