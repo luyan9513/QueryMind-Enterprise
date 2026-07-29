@@ -95,3 +95,24 @@ def test_find_latest_filters_by_evaluator_names(tmp_path: Path) -> None:
 
     assert found is not None
     assert found.checkpoint.evaluator_names == ["sql_accuracy"]
+
+
+def test_find_latest_filters_by_evaluation_mode(tmp_path: Path) -> None:
+    s0_store = _make_store(tmp_path, run_id="20260423_000000_s0")
+    s0_store.checkpoint.config_snapshot = {"evaluation_mode": "s0_single_shot"}
+    s0_store.checkpoint.updated_at = "2024-01-01T00:00:00+00:00"
+    s0_store._write_checkpoint()
+
+    s2_store = _make_store(tmp_path, run_id="20260423_000001_s2")
+    s2_store.checkpoint.config_snapshot = {"evaluation_mode": "s2_agent_with_plan"}
+    s2_store.checkpoint.updated_at = "2024-01-02T00:00:00+00:00"
+    s2_store._write_checkpoint()
+
+    found = EvaluationRunStore.find_latest(
+        tmp_path,
+        dataset_hash="hash",
+        config_filters={"evaluation_mode": "s0_single_shot"},
+    )
+
+    assert found is not None
+    assert found.checkpoint.run_id.endswith("s0")

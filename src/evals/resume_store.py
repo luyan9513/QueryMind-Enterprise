@@ -156,6 +156,7 @@ class EvaluationRunStore:
         *,
         dataset_hash: Optional[str] = None,
         evaluator_names: Optional[List[str]] = None,
+        config_filters: Optional[Dict[str, Any]] = None,
         only_incomplete: bool = True,
     ) -> Optional["EvaluationRunStore"]:
         candidates: List[Tuple[datetime, Path, ResumeCheckpoint]] = []
@@ -177,6 +178,11 @@ class EvaluationRunStore:
                 continue
             if evaluator_names is not None and list(checkpoint.evaluator_names) != list(
                 evaluator_names
+            ):
+                continue
+            if config_filters and any(
+                checkpoint.config_snapshot.get(key) != value
+                for key, value in config_filters.items()
             ):
                 continue
             if only_incomplete and checkpoint.status == "completed":
@@ -294,7 +300,13 @@ class EvaluationRunStore:
             if judge_model and judge_model != agent_model:
                 suffix = f"{suffix}_judge_{judge_model}"
 
-        return f"{self.checkpoint.run_id}_{suffix}" if suffix else self.checkpoint.run_id
+        mode = _slugify_model_name(
+            self.checkpoint.config_snapshot.get("evaluation_mode")
+        )
+        parts = [part for part in [mode, suffix] if part]
+        if not parts:
+            return self.checkpoint.run_id
+        return f"{self.checkpoint.run_id}_{'_'.join(parts)}"
 
     def _write_checkpoint(self) -> None:
         _write_json_atomic(self.checkpoint_path, self.checkpoint.to_dict())

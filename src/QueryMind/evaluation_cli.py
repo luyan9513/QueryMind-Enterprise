@@ -12,6 +12,7 @@ from pathlib import Path
 from QueryMind.core.evaluation import (
     DictEvaluationRuntimeResolver,
     EvaluationDataset,
+    EvaluationMode,
     EvaluationRunner,
     ExpectedOutcomeEvaluator,
     SqlAccuracyEvaluator,
@@ -31,6 +32,7 @@ from evals.bootstrap import (
     dataset_hash,
     load_environment,
     resolve_env_path,
+    resolve_evaluation_mode,
     resolve_evaluation_providers,
     should_show_progress,
 )
@@ -89,6 +91,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--provider",
         help="Override the LLM provider for both agent and judge (deepseek or minimax)",
+    )
+    parser.add_argument(
+        "--evaluation-mode",
+        choices=["s0", "s1", "s2"],
+        help=(
+            "Evaluation strategy: s0 single-shot, s1 Agent without Query Plan, "
+            "or s2 Agent with Query Plan (defaults to EVAL_MODE or s2)"
+        ),
     )
     parser.add_argument(
         "--skip-expected-outcome",
@@ -188,6 +198,7 @@ def _build_config_snapshot(
     allow_write_sql: bool,
     evaluator_names: list[str],
     include_expected_outcome: bool,
+    evaluation_mode: EvaluationMode,
 ) -> dict[str, object]:
     recovery = build_recovery_strategy()
     agent_model = getattr(runtime.agent_llm_service, "model", None)
@@ -196,8 +207,19 @@ def _build_config_snapshot(
         "dataset_path": str(dataset_path),
         "dataset_hash": dataset_hash_value,
         "database_id": runtime.database_id,
+        "database_snapshot_id": os.getenv("EVAL_DATABASE_SNAPSHOT_ID", ""),
         "dialect": runtime.dialect,
         "schema_sync_mode": runtime.schema_sync_mode,
+        "schema_snapshot_id": os.getenv("EVAL_SCHEMA_SNAPSHOT_ID", ""),
+        "schema_search_default_limit": (
+            runtime.agent_config.schema_search_default_limit
+        ),
+        "schema_search_default_threshold": (
+            runtime.agent_config.schema_search_default_threshold
+        ),
+        "schema_search_default_mode": (
+            runtime.agent_config.schema_search_default_mode
+        ),
         "allow_write_sql": allow_write_sql,
         "agent_model": agent_model,
         "agent_provider": agent_provider,
@@ -206,6 +228,8 @@ def _build_config_snapshot(
         "max_metadata_query_retries": (
             runtime.agent_config.max_metadata_query_retries
         ),
+        "max_query_plan_retries": runtime.agent_config.max_query_plan_retries,
+        "require_query_plan": runtime.agent_config.require_query_plan,
         "judge_model": judge_model,
         "judge_provider": judge_provider,
         "pass_threshold": pass_threshold,
@@ -213,7 +237,8 @@ def _build_config_snapshot(
         "max_concurrency": max_concurrency,
         "evaluator_names": evaluator_names,
         "include_expected_outcome": include_expected_outcome,
-        "evaluation_mode": "full" if include_expected_outcome else "sql_accuracy_only",
+        "evaluation_mode": evaluation_mode.value,
+        "evaluator_scope": "full" if include_expected_outcome else "sql_accuracy_only",
         "pricing": {
             "agent": _pricing_snapshot("agent", agent_provider, agent_model),
             "judge": _pricing_snapshot("judge", judge_provider, judge_model),
@@ -237,6 +262,7 @@ def _resolve_run_store(
     dataset_hash_value: str,
     evaluator_names: list[str],
     total_test_cases: int,
+    evaluation_mode: EvaluationMode,
 ) -> EvaluationRunStore:
     if args.resume_run_id and args.run_id and args.resume_run_id != args.run_id:
         raise ValueError("--run-id and --resume-run-id cannot point to different runs")
@@ -252,6 +278,11 @@ def _resolve_run_store(
             raise ValueError(
                 "Resume run evaluator configuration does not match the current evaluation mode."
             )
+        stored_mode = store.checkpoint.config_snapshot.get("evaluation_mode")
+        if stored_mode != evaluation_mode.value:
+            raise ValueError(
+                "Resume run evaluation mode does not match the requested mode."
+            )
         return store
 
     if args.resume_latest:
@@ -259,6 +290,7 @@ def _resolve_run_store(
             resume_root,
             dataset_hash=dataset_hash_value,
             evaluator_names=evaluator_names,
+            config_filters={"evaluation_mode": evaluation_mode.value},
             only_incomplete=True,
         )
         if store is None:
@@ -284,13 +316,15 @@ def _resolve_run_store(
         dataset_description=dataset_description,
         total_test_cases=total_test_cases,
         evaluator_names=evaluator_names,
-        config_snapshot={},
+        config_snapshot={"evaluation_mode": evaluation_mode.value},
         run_id=args.run_id,
     )
 
 
 async def main_async(args: argparse.Namespace) -> None:
     load_environment()
+
+    evaluation_mode = resolve_evaluation_mode(args.evaluation_mode)
 
     agent_provider, judge_provider = resolve_evaluation_providers(args.provider)
     logger.info(
@@ -326,6 +360,7 @@ async def main_async(args: argparse.Namespace) -> None:
         dataset_hash_value=dataset_hash_value,
         evaluator_names=evaluator_names,
         total_test_cases=len(dataset.test_cases),
+        evaluation_mode=evaluation_mode,
     )
 
     configure_logging(store.log_path)
@@ -338,10 +373,14 @@ async def main_async(args: argparse.Namespace) -> None:
     )
 
     emit_status("▶ Building evaluation runtime...")
-    runtime = build_runtime_from_env(provider=agent_provider)
+    runtime = build_runtime_from_env(
+        provider=agent_provider,
+        evaluation_mode=evaluation_mode,
+    )
     emit_status(
         "✅ Evaluation runtime ready "
-        f"(schema mode: {runtime.schema_sync_mode}, "
+        f"(evaluation mode: {evaluation_mode.value}, "
+        f"schema mode: {runtime.schema_sync_mode}, "
         f"max tool iterations: {runtime.agent_config.max_tool_iterations})"
     )
     resolver = DictEvaluationRuntimeResolver({runtime.database_id: runtime})
@@ -384,6 +423,7 @@ async def main_async(args: argparse.Namespace) -> None:
         allow_write_sql=allow_write_sql,
         evaluator_names=evaluator_names,
         include_expected_outcome=include_expected_outcome,
+        evaluation_mode=evaluation_mode,
     )
     store.hydrate_completed_ids()
     store.mark_status("running")

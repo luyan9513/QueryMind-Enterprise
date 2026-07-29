@@ -209,6 +209,7 @@ class SchemaSearch:
             graph_results = await self._search_graph_by_fields(
                 field_names=required_fields,
                 domain_filter=domain_filter,
+                limit=self._config.max_graph_results,
             )
         elif domain_filter:
             graph_results = await self._search_graph_by_domain(domain_filter)
@@ -239,8 +240,36 @@ class SchemaSearch:
         if graph_results and not vector_results:
             return self._rrf_fusion([], graph_results)[:limit]
 
-        # Fusion
-        return self._rrf_fusion(vector_results, graph_results)[:limit]
+        # Fusion. Explicit required fields are stronger evidence than a semantic
+        # similarity score, so keep tables with broader exact-field coverage at
+        # the front. This remains database-agnostic and prevents a relevant
+        # graph-only table from being cut off by the vector result limit.
+        fused_results = self._rrf_fusion(vector_results, graph_results)
+        if required_fields:
+            field_coverage = {}
+            for graph_result in graph_results:
+                table = graph_result.get("table", {})
+                key = (
+                    str(table.get("schema_name", "public")).lower(),
+                    str(table.get("table_name", "")).lower(),
+                )
+                field_coverage[key] = max(
+                    field_coverage.get(key, 0),
+                    int(graph_result.get("field_match_count") or 0),
+                )
+            fused_results.sort(
+                key=lambda item: (
+                    field_coverage.get(
+                        (item.schema_name.lower(), item.table_name.lower()),
+                        0,
+                    ),
+                    item.fusion_score,
+                ),
+                reverse=True,
+            )
+            for rank, item in enumerate(fused_results, 1):
+                item.rank = rank
+        return fused_results[:limit]
     
     async def search_vector_only(
         self,
@@ -420,35 +449,61 @@ class SchemaSearch:
         domain_filter: Optional[str] = None,
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
-        """Search graph by field names."""
-        all_results = []
-        
+        """Search graph by normalized fields and rank tables by field coverage."""
+        normalized_fields = []
+        seen_fields = set()
         for field_name in field_names:
+            normalized = str(field_name or "").strip().strip("`\"[]")
+            normalized = normalized.split(".")[-1] if normalized else ""
+            key = normalized.lower()
+            if normalized and key not in seen_fields:
+                seen_fields.add(key)
+                normalized_fields.append(normalized)
+
+        table_matches: Dict[str, Dict[str, Any]] = {}
+        for field_index, field_name in enumerate(normalized_fields):
             results = await self._graph_store.find_tables_by_field(
                 field_name=field_name,
-                exact_match=False,
+                exact_match=True,
                 limit=limit,
             )
-            all_results.extend(results)
-        
-        # Deduplicate
-        seen = set()
-        unique_results = []
-        for r in all_results:
-            table = r.get("table", {})
-            key = f"{table.get('schema_name', 'public')}.{table.get('table_name', '')}"
-            if key not in seen:
-                seen.add(key)
-                unique_results.append(r)
-        if domain_filter:
-            filtered_results = []
-            for r in unique_results:
-                table = r.get("table", {})
-                if table.get("domain") == domain_filter:
-                    filtered_results.append(r)
-            return filtered_results
+            if not results:
+                results = await self._graph_store.find_tables_by_field(
+                    field_name=field_name,
+                    exact_match=False,
+                    limit=limit,
+                )
 
-        return unique_results
+            for result_index, result in enumerate(results):
+                table = result.get("table", {})
+                schema_name = str(table.get("schema_name", "public"))
+                table_name = str(table.get("table_name", ""))
+                if not table_name:
+                    continue
+                if domain_filter and table.get("domain") != domain_filter:
+                    continue
+                key = f"{schema_name}.{table_name}".lower()
+                entry = table_matches.setdefault(
+                    key,
+                    {
+                        "result": dict(result),
+                        "matched_fields": set(),
+                        "first_seen": (field_index, result_index),
+                    },
+                )
+                entry["matched_fields"].add(field_name.lower())
+
+        ranked_matches = sorted(
+            table_matches.values(),
+            key=lambda item: (-len(item["matched_fields"]), item["first_seen"]),
+        )
+        ranked_results = []
+        for item in ranked_matches[:limit]:
+            result = item["result"]
+            result["matched_fields"] = sorted(item["matched_fields"])
+            result["field_match_count"] = len(item["matched_fields"])
+            ranked_results.append(result)
+        return ranked_results
     
     async def _search_graph_by_domain(
         self,

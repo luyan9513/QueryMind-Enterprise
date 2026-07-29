@@ -25,7 +25,11 @@ if str(SRC_DIR) not in sys.path:
 from dotenv import load_dotenv
 from tqdm import tqdm
 
-from QueryMind.core.evaluation import EvaluationRuntime
+from QueryMind.core.evaluation import (
+    EvaluationMode,
+    EvaluationRuntime,
+    parse_evaluation_mode,
+)
 from QueryMind.core.llm import LlmService
 from QueryMind.core.recovery import ExponentialBackoffStrategy
 from QueryMind.integrations.llmservice import AnthropicLlmService, OpenAILlmService
@@ -62,6 +66,11 @@ def resolve_agent_temperature() -> float:
     if not 0.0 <= value <= 2.0:
         raise ValueError("EVAL_AGENT_TEMPERATURE must be between 0.0 and 2.0")
     return value
+
+
+def resolve_evaluation_mode(value: str | None = None) -> EvaluationMode:
+    """Resolve the isolated S0/S1/S2 strategy from CLI or environment."""
+    return parse_evaluation_mode(value or os.getenv("EVAL_MODE") or "s2")
 
 
 class TqdmProgressReporter:
@@ -310,7 +319,10 @@ def resolve_evaluation_providers(cli_provider: str | None = None) -> tuple[str, 
     return agent_provider, judge_provider
 
 
-def build_runtime_from_env(provider: str | None = None) -> EvaluationRuntime:
+def build_runtime_from_env(
+    provider: str | None = None,
+    evaluation_mode: str | EvaluationMode | None = None,
+) -> EvaluationRuntime:
     """Build a single evaluation runtime from environment variables."""
     from QueryMind.integrations.schemamemory import (
         Mem0VectorConfig,
@@ -336,6 +348,13 @@ def build_runtime_from_env(provider: str | None = None) -> EvaluationRuntime:
     max_metadata_query_retries = int(
         os.getenv("EVAL_MAX_METADATA_QUERY_RETRIES", "2")
     )
+    max_query_plan_retries = int(os.getenv("EVAL_MAX_QUERY_PLAN_RETRIES", "3"))
+    resolved_mode = resolve_evaluation_mode(
+        evaluation_mode.value
+        if isinstance(evaluation_mode, EvaluationMode)
+        else evaluation_mode
+    )
+    require_query_plan = resolved_mode == EvaluationMode.S2_AGENT_WITH_PLAN
     agent_temperature = resolve_agent_temperature()
     business_schemas = ["person", "humanresources", "production", "purchasing", "sales"]
 
@@ -418,10 +437,13 @@ def build_runtime_from_env(provider: str | None = None) -> EvaluationRuntime:
         agent_llm_service=agent_llm,
         schema_memory=schema_memory,
         schema_sync_mode=schema_sync_mode,
+        evaluation_mode=resolved_mode,
         allow_write_sql=os.getenv("EVAL_ALLOW_WRITE_SQL", "false").lower() == "true",
     )
     runtime.agent_config.max_tool_iterations = max_tool_iterations
     runtime.agent_config.max_metadata_query_retries = max_metadata_query_retries
+    runtime.agent_config.max_query_plan_retries = max_query_plan_retries
+    runtime.agent_config.require_query_plan = require_query_plan
     runtime.agent_config.temperature = agent_temperature
     return runtime
 

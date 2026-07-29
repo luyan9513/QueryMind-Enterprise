@@ -511,24 +511,41 @@ class SqlAccuracyEvaluator(Evaluator):
         first_trace_success = (
             run_sql_calls[0].success if run_sql_calls else None
         )
+        agent_trace_success = any(call.success for call in run_sql_calls)
         evaluation_metrics = {
             **comparison,
+            "first_sql_candidate_result_correct": bool(
+                first_comparison["result_correct"]
+                and first_contract_metrics["sql_contract_passed"]
+            ),
+            "first_sql_candidate_business_result_correct": bool(
+                first_business_comparison["result_correct"]
+                and first_contract_metrics["sql_contract_passed"]
+            ),
             "first_sql_execution_success": (
                 bool(first_trace_success)
                 if first_trace_success is not None
                 else bool(first_sql_artifact.success)
             ),
-            "first_sql_result_correct": bool(first_comparison["result_correct"]),
+            "first_sql_result_correct": bool(
+                first_trace_success and first_comparison["result_correct"]
+            ),
             "business_result_correct": bool(
-                business_comparison["result_correct"] and contract_passed
+                agent_trace_success
+                and business_comparison["result_correct"]
+                and contract_passed
             ),
             "verified_result_correct": bool(
-                comparison["result_correct"] and contract_passed
+                agent_trace_success
+                and comparison["result_correct"]
+                and contract_passed
             ),
             "first_sql_business_result_correct": bool(
-                first_business_comparison["result_correct"]
+                first_trace_success
+                and first_business_comparison["result_correct"]
                 and first_contract_metrics["sql_contract_passed"]
             ),
+            "agent_sql_execution_success": agent_trace_success,
             "result_comparison_policy": test_case.result_comparison.model_dump(
                 mode="json"
             ),

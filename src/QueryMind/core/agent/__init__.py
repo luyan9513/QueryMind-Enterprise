@@ -28,6 +28,15 @@ from .sql_governance import (
     sql_governance_rejection_reason,
     sql_semantics_rejection_reason,
 )
+from .query_plan import (
+    QueryPlan,
+    QueryPlanCheck,
+    QueryPlanFilter,
+    build_schema_evidence,
+    validate_query_plan_evidence,
+    validate_query_plan_intent,
+    validate_sql_against_query_plan,
+)
 
 __all__ = [
     "Agent",
@@ -50,4 +59,11 @@ __all__ = [
     "parse_sql_governance_profile",
     "sql_governance_rejection_reason",
     "sql_semantics_rejection_reason",
+    "QueryPlan",
+    "QueryPlanCheck",
+    "QueryPlanFilter",
+    "build_schema_evidence",
+    "validate_query_plan_evidence",
+    "validate_query_plan_intent",
+    "validate_sql_against_query_plan",
 ]

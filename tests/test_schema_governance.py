@@ -43,6 +43,11 @@ from QueryMind.capabilities.agent_memory import (  # noqa: E402
     TextMemorySearchResult,
 )
 from QueryMind.capabilities.agent_memory.base import AgentMemory  # noqa: E402
+from QueryMind.capabilities.schema_memory.models import (  # noqa: E402
+    BusinessContext,
+    FieldDefinition,
+    TableSchema,
+)
 from QueryMind.core.evaluation.runtime import NoOpAgentMemory  # noqa: E402
 from QueryMind.tools.schema_retrieve import SchemaRetrieveTool, SchemaRetrieveToolArgs  # noqa: E402
 
@@ -139,6 +144,43 @@ class _CapturingSchemaMemory:
     async def search_schema(self, *args, **kwargs):
         self.calls.append(kwargs)
         return []
+
+
+class _ExactSchemaMemory:
+    def __init__(self) -> None:
+        self.exact_calls = []
+
+    async def search_schema(self, *args, **kwargs):
+        raise AssertionError("semantic search should not run for exact table lookup")
+
+    async def get_table_schema(self, *args, **kwargs):
+        self.exact_calls.append(kwargs)
+        if kwargs["table_name"] != "orders":
+            return None
+        return TableSchema(
+            database_name="warehouse",
+            schema_name="sales",
+            table_name="orders",
+            ddl="CREATE TABLE sales.orders (order_id int, total numeric)",
+            business_context=BusinessContext(
+                domain="sales",
+                description="Customer orders",
+            ),
+            field_definitions=(
+                [
+                    FieldDefinition(
+                        field_name="order_id",
+                        data_type="integer",
+                        is_primary_key=True,
+                    )
+                ]
+                + [
+                    FieldDefinition(field_name=f"field_{index}", data_type="text")
+                    for index in range(1, 16)
+                ]
+                + [FieldDefinition(field_name="orderdate", data_type="date")]
+            ),
+        )
 
 
 class _NoopConversationStore:
@@ -655,6 +697,58 @@ def test_schema_retrieve_caps_only_unseeded_initial_search() -> None:
     assert initial.metadata["effective_limit"] == 12
     assert memory.calls[1]["limit"] == 20
     assert expanded.metadata["effective_limit"] == 20
+
+
+def test_schema_retrieve_uses_exact_table_names_without_semantic_search() -> None:
+    memory = _ExactSchemaMemory()
+    tool = SchemaRetrieveTool(schema_memory=memory)
+    context = ToolContext(
+        user=_make_user(),
+        conversation_id="conv-exact",
+        request_id="req-exact",
+        agent_memory=_DummyAgentMemory(),
+        metadata={},
+    )
+
+    result = asyncio.run(
+        tool.execute(
+            context,
+            SchemaRetrieveToolArgs(
+                table_names=["warehouse.sales.orders", "sales.missing_table"],
+                search_mode="direct",
+            ),
+        )
+    )
+
+    assert result.success is True
+    assert result.metadata["search_mode"] == "direct"
+    assert result.metadata["selected_tables"] == ["warehouse.sales.orders"]
+    assert "warehouse.sales.orders.order_id" in result.metadata["selected_column_refs"]
+    assert "warehouse.sales.orders.orderdate" in result.metadata["selected_column_refs"]
+    assert result.metadata["selected_primary_keys"] == {
+        "warehouse.sales.orders": ["order_id"]
+    }
+    assert "orderdate (date)" in result.result_for_llm
+    assert result.metadata["missing_exact_tables"] == ["sales.missing_table"]
+    assert memory.exact_calls[0]["database_name"] == "warehouse"
+
+
+def test_schema_retrieve_rejects_empty_semantic_query() -> None:
+    memory = _CapturingSchemaMemory()
+    tool = SchemaRetrieveTool(schema_memory=memory)
+    context = ToolContext(
+        user=_make_user(),
+        conversation_id="conv-empty-query",
+        request_id="req-empty-query",
+        agent_memory=_DummyAgentMemory(),
+        metadata={},
+    )
+
+    result = asyncio.run(tool.execute(context, SchemaRetrieveToolArgs()))
+
+    assert result.success is False
+    assert "query is required" in result.result_for_llm
+    assert memory.calls == []
 
 
 def test_live_schema_snapshot_is_written_back_into_tool_context() -> None:

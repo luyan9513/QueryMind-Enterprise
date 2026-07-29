@@ -343,7 +343,7 @@ def calculate_schema_recall(
 
     retrieved: set[str] = set()
     for record in agent_result.tool_calls:
-        if record.tool_name == "run_sql":
+        if record.tool_name == "run_sql" and record.success:
             break
         if record.tool_name != "schema_retrieve":
             continue
@@ -366,17 +366,59 @@ def enrich_result_metrics(result: EvaluationResult) -> None:
     schema_metrics = calculate_schema_recall(result.test_case, result.agent_result)
     run_sql_calls = result.agent_result.get_tool_calls("run_sql")
     schema_calls = result.agent_result.get_tool_calls("schema_retrieve")
+    plan_calls = result.agent_result.get_tool_calls("submit_query_plan")
     result.metadata.update(schema_metrics)
     result.metadata.update(
         {
             "tool_call_count": len(result.agent_result.tool_calls),
             "schema_retrieve_calls": len(schema_calls),
+            "query_plan_calls": len(plan_calls),
+            "accepted_query_plan": any(bool(call.success) for call in plan_calls),
             "run_sql_calls": len(run_sql_calls),
         }
     )
     result.metadata["first_sql_execution_success"] = (
         bool(run_sql_calls[0].success) if run_sql_calls else False
     )
+    result.metadata["agent_sql_execution_success"] = any(
+        bool(call.success) for call in run_sql_calls
+    )
+
+
+def wilson_score_interval(
+    successes: int,
+    total: int,
+    *,
+    z: float = 1.959963984540054,
+) -> Dict[str, Any]:
+    """Return a two-sided Wilson interval for a binomial proportion."""
+    if total <= 0:
+        return {
+            "successes": 0,
+            "total": 0,
+            "rate": None,
+            "lower": None,
+            "upper": None,
+            "confidence_level": 0.95,
+        }
+    bounded_successes = max(0, min(int(successes), int(total)))
+    n = float(total)
+    rate = bounded_successes / n
+    denominator = 1 + (z * z / n)
+    center = (rate + z * z / (2 * n)) / denominator
+    margin = (
+        z
+        * math.sqrt((rate * (1 - rate) / n) + (z * z / (4 * n * n)))
+        / denominator
+    )
+    return {
+        "successes": bounded_successes,
+        "total": int(total),
+        "rate": rate,
+        "lower": max(0.0, center - margin),
+        "upper": min(1.0, center + margin),
+        "confidence_level": 0.95,
+    }
 
 
 def percentile(values: Iterable[float], fraction: float) -> float:

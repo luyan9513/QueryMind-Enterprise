@@ -1,0 +1,74 @@
+dataset:
+  name: "AdventureWorks v0.3 Query Plan 冒烟集"
+  description: "从冻结 24 题中选取 3 题，只用于验证 schema_retrieve → submit_query_plan → run_sql 新链路。"
+
+  test_cases:
+    - id: "aw_v03_smoke_001"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "各销售区域累计订单金额是多少？按累计金额从高到低排列。"
+      ground_truth_sql: |
+        SELECT st.name AS territory_name, SUM(soh.totaldue) AS total_sales
+        FROM sales.salesorderheader AS soh
+        JOIN sales.salesterritory AS st ON st.territoryid = soh.territoryid
+        GROUP BY st.territoryid, st.name
+        ORDER BY total_sales DESC, territory_name;
+      expected_schema:
+        tables: ["sales.salesorderheader", "sales.salesterritory"]
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by"]
+        required_columns: ["totaldue", "territoryid"]
+        min_projection_count: 2
+        max_projection_count: 2
+      tags: ["aggregation", "join", "ordering", "multi_table"]
+      difficulty: "easy"
+      metadata: {category: "aggregation", source: "regression", query_language: "zh", business_domain: "sales"}
+
+    - id: "aw_v03_smoke_002"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "统计 2024 年每个月的订单数和订单总金额，按月份排列。"
+      ground_truth_sql: |
+        SELECT DATE_TRUNC('month', orderdate)::date AS order_month,
+               COUNT(*) AS order_count,
+               SUM(totaldue) AS total_sales
+        FROM sales.salesorderheader
+        WHERE orderdate >= DATE '2024-01-01' AND orderdate < DATE '2025-01-01'
+        GROUP BY DATE_TRUNC('month', orderdate)
+        ORDER BY order_month;
+      expected_schema:
+        tables: ["sales.salesorderheader"]
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "where", "order_by"]
+        required_columns: ["orderdate", "totaldue"]
+        required_filter_columns: ["orderdate"]
+        min_projection_count: 3
+        max_projection_count: 3
+      tags: ["aggregation", "date_filter", "time_series", "group_by"]
+      difficulty: "easy"
+      metadata: {category: "time_series", source: "regression", query_language: "zh", business_domain: "sales"}
+
+    - id: "aw_v03_smoke_004"
+      database_id: "adventureworks"
+      dialect: "postgres"
+      query: "各商品大类的销售收入是多少？按销售收入从高到低排列。"
+      ground_truth_sql: |
+        SELECT pc.name AS category_name, SUM(sod.orderqty * sod.unitprice * (1 - sod.unitpricediscount)) AS revenue
+        FROM sales.salesorderdetail AS sod
+        JOIN production.product AS p ON p.productid = sod.productid
+        JOIN production.productsubcategory AS psc ON psc.productsubcategoryid = p.productsubcategoryid
+        JOIN production.productcategory AS pc ON pc.productcategoryid = psc.productcategoryid
+        GROUP BY pc.productcategoryid, pc.name
+        ORDER BY revenue DESC, category_name;
+      expected_schema:
+        tables: ["sales.salesorderdetail", "production.product", "production.productsubcategory", "production.productcategory"]
+      result_comparison:
+        numeric_decimal_places: 2
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by"]
+        required_columns: ["orderqty", "unitprice", "unitpricediscount"]
+        min_projection_count: 2
+        max_projection_count: 2
+      tags: ["aggregation", "join", "multi_table", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "join", source: "regression", query_language: "zh", business_domain: "product"}

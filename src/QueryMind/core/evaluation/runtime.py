@@ -27,10 +27,12 @@ from QueryMind.core.llm import LlmService
 from QueryMind.core.registry import ToolRegistry
 from QueryMind.core.storage import Conversation, ConversationStore, Message
 from QueryMind.core.user import RequestContext, User, UserResolver
-from QueryMind.tools import RunSqlTool, SchemaRetrieveTool
+from QueryMind.tools import RunSqlTool, SchemaRetrieveTool, SubmitQueryPlanTool
 from QueryMind.rls_registry import RLSToolRegistry
 
 from .base import SqlTestCase
+from .mode import EvaluationMode, parse_evaluation_mode
+from .single_shot import SingleShotEvaluationAgent
 from .sql_policy import is_read_only_sql
 
 logger = logging.getLogger(__name__)
@@ -191,7 +193,7 @@ class EvaluationSession:
     conversation_store: EvaluationConversationStore
     agent_memory: AgentMemory
     request_context: RequestContext
-    agent: Agent
+    agent: Any
 
 
 @dataclass
@@ -205,6 +207,7 @@ class EvaluationRuntime:
     agent_llm_service: LlmService
     schema_memory: Any
     schema_sync_mode: str = "sync"
+    evaluation_mode: EvaluationMode = EvaluationMode.S2_AGENT_WITH_PLAN
     allow_write_sql: bool = False
     default_user: User = field(
         default_factory=lambda: User(
@@ -287,7 +290,10 @@ class EvaluationRuntime:
             self._initialized = True
 
     def _build_tool_registry(self) -> ToolRegistry:
-        registry = RLSToolRegistry(config_path="rls_config.yaml")
+        registry = RLSToolRegistry(
+            config_path="rls_config.yaml",
+            require_query_plan=self.agent_config.require_query_plan,
+        )
         registry.register_local_tool(
             RunSqlTool(
                 sql_runner=EvaluationSqlRunner(
@@ -298,6 +304,8 @@ class EvaluationRuntime:
             [],
         )
         registry.register_local_tool(SchemaRetrieveTool(schema_memory=self.schema_memory), [])
+        if self.agent_config.require_query_plan:
+            registry.register_local_tool(SubmitQueryPlanTool(), [])
         return registry
 
     def _build_llm_context_enhancer(
@@ -327,32 +335,54 @@ class EvaluationRuntime:
                 "database_id": test_case.database_id,
                 "dialect": test_case.dialect,
                 "test_case_id": test_case.id,
+                "evaluation_mode": parse_evaluation_mode(
+                    self.evaluation_mode
+                ).value,
                 "allow_metadata_query": _env_bool("ALLOW_METADATA_QUERY", False),
             },
         )
 
-        governance_stack = build_schema_governance_stack()
-        sql_governance_stack = build_sql_governance_stack()
-        agent = Agent(
-            llm_service=self.agent_llm_service,
-            tool_registry=self._build_tool_registry(),
-            user_resolver=user_resolver,
-            agent_memory=agent_memory,
-            conversation_store=conversation_store,
-            config=self.agent_config,
-            hooks=[governance_stack.hook, sql_governance_stack.hook],
-            llm_middlewares=[governance_stack.middleware, sql_governance_stack.middleware],
-            llm_context_enhancer=CompositeLlmContextEnhancer(
-                [DefaultLlmContextEnhancer(agent_memory)]
-            ),
-            context_enrichers=[
-                SchemaRetrieveContextEnricher(conversation_store=conversation_store)
-            ],
-            observability_provider=self.observability_provider,
-            schema_memory=self.schema_memory,
-            schema_management_service=self.schema_management_service,
-            schema_governance_manager=governance_stack.manager,
-        )
+        evaluation_mode = parse_evaluation_mode(self.evaluation_mode)
+        tool_registry = self._build_tool_registry()
+        if evaluation_mode == EvaluationMode.S0_SINGLE_SHOT:
+            agent = SingleShotEvaluationAgent(
+                llm_service=self.agent_llm_service,
+                tool_registry=tool_registry,
+                conversation_store=conversation_store,
+                user=user,
+                agent_memory=agent_memory,
+                config=self.agent_config,
+                dialect=self.dialect,
+                schema_memory=self.schema_memory,
+                schema_management_service=self.schema_management_service,
+                observability_provider=self.observability_provider,
+            )
+        else:
+            governance_stack = build_schema_governance_stack()
+            sql_governance_stack = build_sql_governance_stack()
+            agent = Agent(
+                llm_service=self.agent_llm_service,
+                tool_registry=tool_registry,
+                user_resolver=user_resolver,
+                agent_memory=agent_memory,
+                conversation_store=conversation_store,
+                config=self.agent_config,
+                hooks=[governance_stack.hook, sql_governance_stack.hook],
+                llm_middlewares=[
+                    governance_stack.middleware,
+                    sql_governance_stack.middleware,
+                ],
+                llm_context_enhancer=CompositeLlmContextEnhancer(
+                    [DefaultLlmContextEnhancer(agent_memory)]
+                ),
+                context_enrichers=[
+                    SchemaRetrieveContextEnricher(conversation_store=conversation_store)
+                ],
+                observability_provider=self.observability_provider,
+                schema_memory=self.schema_memory,
+                schema_management_service=self.schema_management_service,
+                schema_governance_manager=governance_stack.manager,
+            )
 
         return EvaluationSession(
             runtime=self,

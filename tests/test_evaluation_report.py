@@ -7,11 +7,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from QueryMind.core.evaluation import (  # noqa: E402
     AgentResult,
+    ComparisonReport,
     EvaluationReport,
     EvaluationResult,
     SqlExecutionArtifact,
     SqlTestCase,
+    ToolInvocationRecord,
 )
+from evals.compare_runs import load_report  # noqa: E402
 
 
 def _make_result(
@@ -243,3 +246,123 @@ def test_detailed_markdown_explains_accuracy_sql_and_failure(tmp_path: Path) -> 
     assert "缺少必要字段：total" in rendered
     assert "为什么错" in rendered
     assert "建议怎么改" in rendered
+
+
+def test_agent_value_metrics_and_wilson_intervals_are_exported() -> None:
+    recovered = _make_result(
+        test_case_id="recovered",
+        passed=True,
+        agent_success=True,
+        score=1.0,
+        execution_time_ms=1000.0,
+    )
+    recovered.metadata.update(
+        {
+            "first_sql_candidate_business_result_correct": False,
+            "first_sql_execution_success": True,
+            "business_result_correct": True,
+            "verified_result_correct": True,
+            "accepted_query_plan": True,
+            "agent_sql_execution_success": True,
+        }
+    )
+    recovered.agent_result.tool_calls = [
+        ToolInvocationRecord(
+            tool_call_id="plan",
+            tool_name="submit_query_plan",
+            success=True,
+        ),
+        ToolInvocationRecord(
+            tool_call_id="sql",
+            tool_name="run_sql",
+            success=True,
+        ),
+    ]
+    blocked = _make_result(
+        test_case_id="blocked",
+        passed=False,
+        agent_success=True,
+        score=0.0,
+        execution_time_ms=3000.0,
+    )
+    blocked.metadata.update(
+        {
+            "first_sql_candidate_business_result_correct": True,
+            "first_sql_execution_success": False,
+            "business_result_correct": False,
+            "verified_result_correct": False,
+            "agent_sql_execution_success": True,
+        }
+    )
+    report = EvaluationReport(dataset_name="agent value", results=[recovered, blocked])
+
+    report.enrich_metadata()
+    metrics = report.metadata["enterprise_metrics"]
+
+    assert metrics["recovery_yield"]["rate"] == 1.0
+    assert metrics["false_block_rate"]["rate"] == 1.0
+    assert metrics["plan_acceptance_precision"]["rate"] == 1.0
+    assert metrics["wrong_executed_rate"] == 0.5
+    assert metrics["p50_agent_execution_time_ms"] == 2000.0
+    assert metrics["max_agent_execution_time_ms"] == 3000.0
+    assert metrics["tool_call_totals"] == {"run_sql": 1, "submit_query_plan": 1}
+    assert metrics["accuracy_wilson_95"]["strict_result_correct"]["rate"] == 0.5
+
+
+def test_comparison_report_rejects_unfair_model_change(tmp_path: Path) -> None:
+    s0 = EvaluationReport(
+        dataset_name="demo",
+        results=[
+            _make_result(
+                test_case_id="case-1",
+                passed=True,
+                agent_success=True,
+                score=1.0,
+                execution_time_ms=100.0,
+            )
+        ],
+        metadata={
+            "config_snapshot": {
+                "dataset_hash": "same",
+                "agent_model": "model-a",
+                "evaluation_mode": "s0_single_shot",
+            }
+        },
+    )
+    s1 = s0.model_copy(deep=True)
+    s1.metadata["config_snapshot"]["agent_model"] = "model-b"
+    s1.metadata["config_snapshot"]["evaluation_mode"] = "s1_agent_without_plan"
+    comparison = ComparisonReport(reports={"s0": s0, "s1": s1})
+
+    assert "agent_model:s0!=s1" in comparison.comparability_issues()
+    assert "missing:database_snapshot_id:s0" in comparison.comparability_issues()
+    output_path = tmp_path / "comparison.md"
+    comparison.save_markdown(output_path)
+    assert "是否可公平比较：否" in output_path.read_text(encoding="utf-8")
+
+    sanitized_path = tmp_path / "sanitized-report.json"
+    s0.results[0].agent_artifact.preview_rows = [{"sensitive": "value"}]
+    s0.save_json(sanitized_path)
+    loaded = load_report(str(sanitized_path))
+    assert loaded.results[0].agent_artifact.preview_rows == []
+
+
+def test_repeat_stability_reports_volatile_case_ids() -> None:
+    first = _make_result(
+        test_case_id="same-case",
+        passed=True,
+        agent_success=True,
+        score=1.0,
+        execution_time_ms=100.0,
+    )
+    first.metadata["business_result_correct"] = True
+    second = first.model_copy(deep=True)
+    second.metadata["business_result_correct"] = False
+    report = EvaluationReport(dataset_name="repeats", results=[first, second])
+
+    assert report.repeat_stability() == {
+        "repeated_case_count": 1,
+        "consistent_case_count": 0,
+        "consistency_rate": 0.0,
+        "volatile_case_ids": ["same-case"],
+    }

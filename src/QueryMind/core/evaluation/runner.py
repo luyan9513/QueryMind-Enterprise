@@ -105,9 +105,13 @@ class EvaluationRunner:
             execution_time_ms = 0.0
             agent_start: float | None = None
             trace_error: Optional[str] = None
+            evaluation_mode = "unknown"
 
             try:
                 runtime = await self.runtime_resolver.resolve(test_case)
+                evaluation_mode = str(
+                    getattr(runtime.evaluation_mode, "value", runtime.evaluation_mode)
+                )
                 session = await runtime.create_session(test_case)
                 user_id = session.user.id
                 conversation_id = session.conversation_id
@@ -152,6 +156,7 @@ class EvaluationRunner:
                 else 0,
                 "agent_run_time_ms": execution_time_ms,
                 "llm_call_count": llm_call_count,
+                "evaluation_mode": evaluation_mode,
             }
             if trace_error is not None:
                 metadata["trace_load_error"] = redact_sensitive_text(trace_error)

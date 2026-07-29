@@ -26,6 +26,7 @@ from QueryMind.core.evaluation.metrics import (  # noqa: E402
     evaluate_sql_contract,
     estimate_usage_cost_usd,
     fingerprint_dataframe,
+    wilson_score_interval,
 )
 from QueryMind.core.evaluation.sanitization import (  # noqa: E402
     redact_sensitive_text,
@@ -226,7 +227,11 @@ def test_schema_recall_only_counts_retrieval_before_first_sql() -> None:
             tool_name="schema_retrieve",
             metadata={"selected_tables": ["sales.salesorderheader"]},
         ),
-        ToolInvocationRecord(tool_call_id="sql-1", tool_name="run_sql"),
+        ToolInvocationRecord(
+            tool_call_id="sql-1",
+            tool_name="run_sql",
+            success=True,
+        ),
         ToolInvocationRecord(
             tool_call_id="retrieve-2",
             tool_name="schema_retrieve",
@@ -245,7 +250,33 @@ def test_schema_recall_only_counts_retrieval_before_first_sql() -> None:
         metadata={"first_sql_execution_success": True},
     )
     enrich_result_metrics(result)
-    assert result.metadata["first_sql_execution_success"] is False
+    assert result.metadata["first_sql_execution_success"] is True
+    assert result.metadata["agent_sql_execution_success"] is True
+
+
+def test_schema_recall_continues_after_rejected_sql_attempt() -> None:
+    calls = [
+        ToolInvocationRecord(
+            tool_call_id="sql-rejected",
+            tool_name="run_sql",
+            success=False,
+        ),
+        ToolInvocationRecord(
+            tool_call_id="retrieve-after-rejection",
+            tool_name="schema_retrieve",
+            success=True,
+            metadata={
+                "selected_tables": [
+                    "sales.salesorderheader",
+                    "sales.salesterritory",
+                ]
+            },
+        ),
+    ]
+
+    metrics = calculate_schema_recall(_test_case(), _agent_result(calls))
+
+    assert metrics["schema_recall"] == 1.0
 
 
 def test_cost_estimate_uses_cache_hit_miss_and_output_tokens() -> None:
@@ -396,3 +427,12 @@ def test_chinese_business_dataset_is_valid_and_has_schema_contracts() -> None:
         )["sql_contract_passed"]
         for case in dataset
     )
+
+
+def test_wilson_interval_is_bounded_and_keeps_observed_rate() -> None:
+    interval = wilson_score_interval(9, 10)
+
+    assert interval["rate"] == 0.9
+    assert 0.0 < interval["lower"] < 0.9
+    assert 0.9 < interval["upper"] <= 1.0
+    assert wilson_score_interval(0, 0)["rate"] is None

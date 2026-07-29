@@ -20,6 +20,7 @@ from .run_sql import RunSqlTool
 from .visualize_data import VisualizeDataTool
 from .agent_memory import SaveQuestionToolArgsTool, SearchSavedCorrectToolUsesTool, SaveTextMemoryTool
 from .schema_retrieve import SchemaRetrieveTool, SchemaRetrieveToolArgs, SearchMode
+from .query_plan import SubmitQueryPlanTool
 
 __all__ = [
     # File system
@@ -48,4 +49,6 @@ __all__ = [
     "SchemaRetrieveTool",
     "SchemaRetrieveToolArgs",
     "SearchMode",
+    # Query Plan
+    "SubmitQueryPlanTool",
 ]

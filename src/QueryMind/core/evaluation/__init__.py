@@ -16,6 +16,7 @@ from .base import (
 )
 from .dataset import EvaluationDataset
 from .evaluators import SqlAccuracyEvaluator
+from .mode import EvaluationMode, parse_evaluation_mode
 from .outcome import ExpectedOutcomeEvaluator
 from .report import ComparisonReport, EvaluationReport
 from .runner import EvaluationRunner
@@ -33,6 +34,7 @@ __all__ = [
     "AgentResult",
     "EvaluationDataset",
     "EvaluationResult",
+    "EvaluationMode",
     "EvaluationReport",
     "ComparisonReport",
     "EvaluationRunner",
@@ -57,4 +59,5 @@ __all__ = [
     "SqlTestCase",
     "ValidationIssue",
     "ToolInvocationRecord",
+    "parse_evaluation_mode",
 ]

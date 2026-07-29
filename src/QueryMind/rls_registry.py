@@ -27,6 +27,10 @@ from QueryMind.core.agent.sql_governance import (
     sql_semantics_rejection_reason,
     sql_skeleton_freeze_rejection_reason,
 )
+from QueryMind.core.agent.query_plan import (
+    QueryPlan,
+    validate_sql_against_query_plan,
+)
 from QueryMind.core.tool import Tool, ToolContext, ToolRejection
 from QueryMind.core.user import User
 from QueryMind.capabilities.sql_runner.models import RunSqlToolArgs
@@ -48,6 +52,7 @@ class RLSToolRegistry(ToolRegistry):
         config_path: str = "rls_config.yaml",
         audit_logger=None,
         audit_config=None,
+        require_query_plan: bool = False,
     ):
         """Initialize RLS Registry.
         
@@ -55,10 +60,12 @@ class RLSToolRegistry(ToolRegistry):
             config_path: Path to rls_config.yaml
             audit_logger: Optional audit logger
             audit_config: Optional audit config
+            require_query_plan: Require an accepted schema-grounded plan before run_sql
         """
         super().__init__(audit_logger=audit_logger, audit_config=audit_config)
         self._load_config(config_path)
         self._sql_governance_policy = SqlGovernancePolicy.from_env()
+        self.require_query_plan = require_query_plan
     
     def _load_config(self, config_path: str) -> None:
         """Load RLS configuration from YAML file."""
@@ -415,7 +422,45 @@ class RLSToolRegistry(ToolRegistry):
                 code="query_complexity",
             )
 
-        # 3. SQL Semantics Validation
+        # 3. Runtime Query Plan Alignment
+        if self.require_query_plan:
+            raw_plan = context.metadata.get("query_plan")
+            plan_status = str(context.metadata.get("query_plan_status") or "")
+            if not isinstance(raw_plan, dict) or plan_status != "accepted":
+                return ToolRejection(
+                    reason=(
+                        "SQL rejected: submit a schema-grounded query plan with "
+                        "submit_query_plan before run_sql."
+                    ),
+                    stage="planning",
+                    code="query_plan_required",
+                )
+            try:
+                query_plan = QueryPlan.model_validate(raw_plan)
+            except Exception:
+                return ToolRejection(
+                    reason="SQL rejected: the accepted query plan is invalid; submit it again.",
+                    stage="planning",
+                    code="query_plan_invalid",
+                )
+
+            plan_check = validate_sql_against_query_plan(
+                query_plan,
+                original_sql,
+                dialect=str(context.metadata.get("dialect") or "").strip() or None,
+            )
+            if not plan_check.passed:
+                issue_text = "; ".join(plan_check.issues[:8])
+                return ToolRejection(
+                    reason=(
+                        "SQL rejected: it does not match the accepted query plan. "
+                        f"Repair the SQL or submit a corrected plan: {issue_text}"
+                    ),
+                    stage="planning",
+                    code="query_plan_sql_mismatch",
+                )
+
+        # 4. SQL Semantics Validation
         semantics_reason = sql_semantics_rejection_reason(
             original_sql,
             user_message=context.raw_user_message,
@@ -434,7 +479,7 @@ class RLSToolRegistry(ToolRegistry):
                 code="sql_semantics",
             )
 
-        # 4. Territory-Based RLS
+        # 5. Territory-Based RLS
         if self._should_apply_rls(sql):
             sql = self._apply_territory_rls(sql, user)
             
@@ -494,6 +539,7 @@ class RLSToolRegistry(ToolRegistry):
 def create_rls_registry(
     config_path: str = "rls_config.yaml",
     audit_logger=None,
+    require_query_plan: bool = False,
 ) -> RLSToolRegistry:
     """Create an RLS-enabled ToolRegistry.
     
@@ -507,4 +553,5 @@ def create_rls_registry(
     return RLSToolRegistry(
         config_path=config_path,
         audit_logger=audit_logger,
+        require_query_plan=require_query_plan,
     )

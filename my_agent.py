@@ -20,6 +20,13 @@ QUERY_RESULTS_DIR = resolve_data_dir("QUERYMIND_QUERY_RESULTS_DIR", "query_resul
 MAX_TOOL_ITERATIONS = int(os.getenv("MAX_TOOL_ITERATIONS", "25"))
 AGENT_TEMPERATURE = float(os.getenv("AGENT_TEMPERATURE", "0.0"))
 MAX_METADATA_QUERY_RETRIES = int(os.getenv("MAX_METADATA_QUERY_RETRIES", "2"))
+MAX_QUERY_PLAN_RETRIES = int(os.getenv("MAX_QUERY_PLAN_RETRIES", "3"))
+REQUIRE_QUERY_PLAN = os.getenv("REQUIRE_QUERY_PLAN", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 from QueryMind.core import Agent, AgentConfig, ToolRegistry  # noqa: E402
 from QueryMind.core.agent import (  # noqa: E402
@@ -72,6 +79,7 @@ from QueryMind.tools import (  # noqa: E402
     SaveQuestionToolArgsTool,
     SaveTextMemoryTool,
     SchemaRetrieveTool,
+    SubmitQueryPlanTool,
     SearchFilesTool,
     SearchSavedCorrectToolUsesTool,
     VisualizeDataTool,
@@ -138,6 +146,7 @@ def register_tools(registry: ToolRegistry, schema_memory: Neo4jMem0SchemaMemory)
             ["user", "admin"],
         ),
         (SchemaRetrieveTool(schema_memory=schema_memory), ["user", "admin"]),
+        (SubmitQueryPlanTool(), ["user", "admin"]),
     ]
     memory_tools = [
         (SaveQuestionToolArgsTool(), ["user", "admin"]),
@@ -244,6 +253,7 @@ def build_agent() -> Agent:
             table_name="audit_events",
             schema_name="public",
         ),
+        require_query_plan=REQUIRE_QUERY_PLAN,
     )
     register_tools(registry, schema_memory)
 
@@ -251,6 +261,8 @@ def build_agent() -> Agent:
         max_tool_iterations=MAX_TOOL_ITERATIONS,
         temperature=AGENT_TEMPERATURE,
         max_metadata_query_retries=MAX_METADATA_QUERY_RETRIES,
+        max_query_plan_retries=MAX_QUERY_PLAN_RETRIES,
+        require_query_plan=REQUIRE_QUERY_PLAN,
         schema_search_default_threshold=0.4,
     )
 

@@ -569,16 +569,24 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
                 
                 results = []
                 for rank, gr in enumerate(graph_results):
+                    table_name = gr.get("table", {}).get("table_name", "")
+                    schema_name = gr.get("table", {}).get("schema_name", "public")
                     fusion_result = FusionResult(
-                        table_name=gr.get("table", {}).get("table_name", ""),
-                        schema_name=gr.get("table", {}).get("schema_name", "public"),
+                        table_name=table_name,
+                        schema_name=schema_name,
                         vector_score=None,
                         graph_score=1.0,
                         fusion_score=1.0,
                         rank=rank + 1,
                         source="graph",
                     )
-                    results.append(self._build_search_result(fusion_result, gr))
+                    table_data = await self._neo4j_store.get_table_schema(
+                        table_name=table_name,
+                        schema_name=schema_name,
+                    )
+                    results.append(
+                        self._build_search_result(fusion_result, table_data)
+                    )
                 return results
             return []
         

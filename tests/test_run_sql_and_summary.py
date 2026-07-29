@@ -176,7 +176,14 @@ def test_system_prompt_mentions_sql_fallback() -> None:
             email="tester@example.com",
             group_memberships=[],
         ),
-        tools=[ToolSchema(name="run_sql", description="Execute SQL", parameters={})],
+        tools=[
+            ToolSchema(name="run_sql", description="Execute SQL", parameters={}),
+            ToolSchema(
+                name="submit_query_plan",
+                description="Submit plan",
+                parameters={},
+            ),
+        ],
     )
     )
 
@@ -184,6 +191,8 @@ def test_system_prompt_mentions_sql_fallback() -> None:
     assert "Return exactly the dimensions and metrics" in prompt
     assert "Preserve database numeric precision" in prompt
     assert "Do not invent status" in prompt
+    assert "submit_query_plan" in prompt
+    assert "accepted plan exactly" in prompt
     assert "Runtime context notices are authoritative" in prompt
 
 
@@ -229,3 +238,17 @@ def test_agent_metadata_retry_limit_is_bounded() -> None:
         pass
     else:  # pragma: no cover - defensive assertion
         raise AssertionError("zero metadata retry limit should fail validation")
+
+
+def test_agent_query_plan_defaults_are_bounded_and_opt_in() -> None:
+    config = AgentConfig()
+
+    assert config.require_query_plan is False
+    assert config.max_query_plan_retries == 3
+
+    try:
+        AgentConfig(max_query_plan_retries=0)
+    except ValueError:
+        pass
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("zero query plan retry limit should fail validation")

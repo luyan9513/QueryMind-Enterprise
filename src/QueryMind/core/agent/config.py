@@ -137,6 +137,21 @@ class AgentConfig(BaseModel):
             "schema retrieval recovery turn"
         ),
     )
+    max_query_plan_retries: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description=(
+            "Rejected query plan or SQL alignment attempts allowed before "
+            "the agent stops tools and asks for clarification"
+        ),
+    )
+    require_query_plan: bool = Field(
+        default=False,
+        description=(
+            "Require submit_query_plan evidence and SQL alignment before run_sql"
+        ),
+    )
     max_tokens: Optional[int] = Field(default=None, gt=0)
     ui_features: UiFeatures = Field(default_factory=UiFeatures)
     audit_config: AuditConfig = Field(default_factory=AuditConfig)

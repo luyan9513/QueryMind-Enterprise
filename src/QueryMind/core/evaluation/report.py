@@ -13,7 +13,12 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from .base import EvaluationResult
-from .metrics import estimate_usage_cost_usd, merge_token_usage, percentile
+from .metrics import (
+    estimate_usage_cost_usd,
+    merge_token_usage,
+    percentile,
+    wilson_score_interval,
+)
 from .sanitization import redact_sensitive_text, sanitize_export_payload
 
 
@@ -137,6 +142,15 @@ class EvaluationReport(BaseModel):
         )
         return successful / len(self.results)
 
+    def agent_sql_execution_success_rate(self) -> float:
+        """Rate of cases with a run_sql call accepted and executed by the Agent."""
+        if not self.results:
+            return 0.0
+        return sum(
+            bool(item.metadata.get("agent_sql_execution_success"))
+            for item in self.results
+        ) / len(self.results)
+
     def result_correct_rate(self) -> float:
         measured = [
             item
@@ -231,6 +245,108 @@ class EvaluationReport(BaseModel):
             0.95,
         )
 
+    def p50_agent_execution_time(self) -> float:
+        return percentile(
+            [item.agent_result.execution_time_ms for item in self.results],
+            0.50,
+        )
+
+    def max_agent_execution_time(self) -> float:
+        return max(
+            (item.agent_result.execution_time_ms for item in self.results),
+            default=0.0,
+        )
+
+    def tool_call_totals(self) -> Dict[str, int]:
+        counter: Counter[str] = Counter()
+        for item in self.results:
+            counter.update(call.tool_name for call in item.agent_result.tool_calls)
+        return dict(sorted(counter.items()))
+
+    def recovery_yield(self) -> Dict[str, Any]:
+        eligible = [
+            item
+            for item in self.results
+            if item.metadata.get("first_sql_candidate_business_result_correct")
+            is False
+        ]
+        recovered = sum(
+            bool(item.metadata.get("business_result_correct")) for item in eligible
+        )
+        return {
+            "recovered_cases": recovered,
+            "eligible_cases": len(eligible),
+            "rate": recovered / len(eligible) if eligible else None,
+        }
+
+    def false_block_rate(self) -> Dict[str, Any]:
+        candidate_correct = [
+            item
+            for item in self.results
+            if item.metadata.get("first_sql_candidate_business_result_correct")
+            is True
+        ]
+        blocked = sum(
+            item.metadata.get("first_sql_execution_success") is False
+            for item in candidate_correct
+        )
+        return {
+            "blocked_cases": blocked,
+            "correct_candidate_cases": len(candidate_correct),
+            "rate": blocked / len(candidate_correct) if candidate_correct else None,
+        }
+
+    def plan_acceptance_precision(self) -> Dict[str, Any]:
+        accepted = [
+            item for item in self.results if item.metadata.get("accepted_query_plan")
+        ]
+        correct = sum(
+            bool(item.metadata.get("business_result_correct")) for item in accepted
+        )
+        return {
+            "correct_cases": correct,
+            "accepted_plan_cases": len(accepted),
+            "rate": correct / len(accepted) if accepted else None,
+        }
+
+    def wrong_executed_rate(self) -> float:
+        if not self.results:
+            return 0.0
+        wrong_executed = sum(
+            bool(item.metadata.get("agent_sql_execution_success"))
+            and not bool(item.metadata.get("business_result_correct"))
+            for item in self.results
+        )
+        return wrong_executed / len(self.results)
+
+    def automatic_answer_coverage(self) -> float:
+        if not self.results:
+            return 0.0
+        return sum(
+            bool(item.metadata.get("agent_sql_execution_success"))
+            for item in self.results
+        ) / len(self.results)
+
+    def accuracy_intervals(self) -> Dict[str, Dict[str, Any]]:
+        total = len(self.results)
+        strict = sum(
+            bool(
+                item.metadata.get(
+                    "verified_result_correct",
+                    item.metadata.get("result_correct"),
+                )
+            )
+            for item in self.results
+        )
+        business = sum(
+            bool(item.metadata.get("business_result_correct"))
+            for item in self.results
+        )
+        return {
+            "strict_result_correct": wilson_score_interval(strict, total),
+            "business_result_correct": wilson_score_interval(business, total),
+        }
+
     def failure_distribution(self) -> Dict[str, int]:
         return dict(
             Counter(
@@ -269,6 +385,53 @@ class EvaluationReport(BaseModel):
         costs = [self.estimated_cost_usd("agent"), self.estimated_cost_usd("judge")]
         available = [cost for cost in costs if cost is not None]
         return sum(available) if available else None
+
+    def cost_per_correct_usd(self, *, business: bool = False) -> Optional[float]:
+        total_cost = self.total_estimated_cost_usd()
+        if total_cost is None:
+            return None
+        if business:
+            correct = sum(
+                bool(item.metadata.get("business_result_correct"))
+                for item in self.results
+            )
+        else:
+            correct = sum(
+                bool(
+                    item.metadata.get(
+                        "verified_result_correct",
+                        item.metadata.get("result_correct"),
+                    )
+                )
+                for item in self.results
+            )
+        return total_cost / correct if correct else None
+
+    def repeat_stability(self) -> Dict[str, Any]:
+        """Measure whether repeated runs of the same case keep the same outcome."""
+        grouped: Dict[str, List[bool]] = defaultdict(list)
+        for item in self.results:
+            grouped[item.test_case.id].append(
+                bool(item.metadata.get("business_result_correct"))
+            )
+        repeated = {key: values for key, values in grouped.items() if len(values) > 1}
+        if not repeated:
+            return {
+                "repeated_case_count": 0,
+                "consistent_case_count": 0,
+                "consistency_rate": None,
+                "volatile_case_ids": [],
+            }
+        volatile = sorted(
+            key for key, values in repeated.items() if len(set(values)) > 1
+        )
+        consistent = len(repeated) - len(volatile)
+        return {
+            "repeated_case_count": len(repeated),
+            "consistent_case_count": consistent,
+            "consistency_rate": consistent / len(repeated),
+            "volatile_case_ids": volatile,
+        }
 
     def issue_tag_distribution(self) -> Dict[str, int]:
         counter: Counter[str] = Counter()
@@ -342,6 +505,9 @@ class EvaluationReport(BaseModel):
         self.metadata["enterprise_metrics"] = {
             "schema_recall": self.average_schema_recall(),
             "sql_execution_success_rate": self.execution_success_rate(),
+            "agent_sql_execution_success_rate": (
+                self.agent_sql_execution_success_rate()
+            ),
             "result_correct_rate": self.result_correct_rate(),
             "business_result_correct_rate": self.business_result_correct_rate(),
             "sql_contract_pass_rate": self.sql_contract_pass_rate(),
@@ -349,12 +515,26 @@ class EvaluationReport(BaseModel):
             "first_sql_result_correct_rate": self.first_sql_result_correct_rate(),
             "average_tool_calls": self.average_tool_calls(),
             "p95_tool_calls": self.p95_tool_calls(),
+            "tool_call_totals": self.tool_call_totals(),
+            "p50_agent_execution_time_ms": self.p50_agent_execution_time(),
             "p95_agent_execution_time_ms": self.p95_agent_execution_time(),
+            "max_agent_execution_time_ms": self.max_agent_execution_time(),
+            "automatic_answer_coverage": self.automatic_answer_coverage(),
+            "wrong_executed_rate": self.wrong_executed_rate(),
+            "recovery_yield": self.recovery_yield(),
+            "false_block_rate": self.false_block_rate(),
+            "plan_acceptance_precision": self.plan_acceptance_precision(),
+            "accuracy_wilson_95": self.accuracy_intervals(),
             "failure_distribution": self.failure_distribution(),
             "secondary_failure_distribution": self.secondary_failure_distribution(),
             "agent_token_usage": self.token_usage("agent"),
             "judge_token_usage": self.token_usage("judge"),
             "estimated_cost_usd": self.total_estimated_cost_usd(),
+            "cost_per_strict_correct_usd": self.cost_per_correct_usd(),
+            "cost_per_business_correct_usd": self.cost_per_correct_usd(
+                business=True
+            ),
+            "repeat_stability": self.repeat_stability(),
         }
 
     def get_failures(self) -> List[EvaluationResult]:
@@ -399,9 +579,17 @@ class EvaluationReport(BaseModel):
             print(f"Evaluators: {', '.join(self.evaluator_names)}")
         print(f"Evaluator Pass Rate: {self.pass_rate():.2%}")
         print(f"Average Score: {self.average_score():.2f}")
-        print(f"Execution Success Rate: {self.execution_success_rate():.2%}")
+        print(
+            "Evaluator SQL Re-execution Success Rate: "
+            f"{self.execution_success_rate():.2%}"
+        )
+        print(
+            "Agent SQL Execution Success Rate: "
+            f"{self.agent_sql_execution_success_rate():.2%}"
+        )
         print(f"Strict Result Correct Rate: {self.result_correct_rate():.2%}")
         print(f"Business Result Correct Rate: {self.business_result_correct_rate():.2%}")
+        print(f"Wrong Executed Rate: {self.wrong_executed_rate():.2%}")
         print(f"SQL Contract Pass Rate: {self.sql_contract_pass_rate():.2%}")
         print(f"Schema Recall: {self.average_schema_recall():.2%}")
         print(
@@ -588,6 +776,19 @@ class EvaluationReport(BaseModel):
         self.enrich_metadata()
         total_cost = self.total_estimated_cost_usd()
         cost_label = f"${total_cost:.6f}" if total_cost is not None else "未配置价格"
+        strict_cost = self.cost_per_correct_usd()
+        business_cost = self.cost_per_correct_usd(business=True)
+        strict_cost_label = (
+            f"${strict_cost:.6f}" if strict_cost is not None else "无法计算"
+        )
+        business_cost_label = (
+            f"${business_cost:.6f}" if business_cost is not None else "无法计算"
+        )
+        stability = self.repeat_stability()
+        consistency = stability.get("consistency_rate")
+        consistency_label = (
+            f"{float(consistency):.2%}" if consistency is not None else "没有重复运行"
+        )
         lines = [
             f"# 系统评测明细：{self.dataset_name}",
             "",
@@ -602,18 +803,26 @@ class EvaluationReport(BaseModel):
             f"- 严格结果准确率：{self.result_correct_rate():.2%}",
             f"- 业务等价准确率：{self.business_result_correct_rate():.2%}",
             f"- SQL 契约通过率：{self.sql_contract_pass_rate():.2%}",
-            f"- SQL 可执行率：{self.execution_success_rate():.2%}",
+            f"- 评测器事后 SQL 可执行率：{self.execution_success_rate():.2%}",
+            f"- Agent 内部 SQL 执行成功率：{self.agent_sql_execution_success_rate():.2%}",
             f"- 首条 SQL 严格正确率：{self.first_sql_result_correct_rate():.2%}",
             f"- Schema Recall：{self.average_schema_recall():.2%}",
             f"- 平均 / P95 工具调用：{self.average_tool_calls():.2f} / {self.p95_tool_calls():.2f}",
             f"- 平均 / P95 Agent 延迟：{self.average_execution_time() / 1000:.2f}s / {self.p95_agent_execution_time() / 1000:.2f}s",
+            f"- P50 / 最大 Agent 延迟：{self.p50_agent_execution_time() / 1000:.2f}s / {self.max_agent_execution_time() / 1000:.2f}s",
+            f"- 自动回答覆盖率：{self.automatic_answer_coverage():.2%}",
+            f"- 错误但已执行比例：{self.wrong_executed_rate():.2%}",
             f"- 估算模型成本：{cost_label}",
+            f"- 每个严格 / 业务正确答案成本：{strict_cost_label} / {business_cost_label}",
+            f"- 同题重复运行一致率：{consistency_label}",
             "",
             "### 指标怎么理解",
             "",
             "- 严格结果准确率：完整结果值、行数、列数和题目契约同时通过，最保守。",
             "- 业务等价准确率：允许评测题显式声明的小数精度、同义值和顺序差异，但仍必须通过 SQL 契约。",
             "- SQL 契约：检查必要聚合、分组、过滤字段、输出列等结构，防止错误 SQL 被宽松 Judge 误判为正确。",
+            "- 评测器事后 SQL 可执行率：评测器单独执行 Agent 最后尝试的 SQL；不代表 Agent 运行时放行并执行。",
+            "- Agent 内部 SQL 执行成功率：至少一次 `run_sql` 真正通过计划、治理和权限检查并执行成功。",
             "- Evaluator 通过率不是严格准确率；其中可能包含大模型 Judge 的判断，应结合上面三个确定性指标阅读。",
             "- 任何指标都只代表当前数据、当前问题集和当前模型配置，不能证明换一套数据后仍然 100% 正确。",
             "",
@@ -644,6 +853,9 @@ class EvaluationReport(BaseModel):
             execution_success = bool(
                 result.agent_artifact is not None and result.agent_artifact.success
             )
+            agent_execution_success = bool(
+                metadata.get("agent_sql_execution_success")
+            )
             failure = str(metadata.get("primary_failure") or "unknown")
             reference_sql = (
                 result.ground_truth_artifact.sql_text
@@ -666,7 +878,7 @@ class EvaluationReport(BaseModel):
                     f"### {index}. {result.test_case.id}",
                     "",
                     f"- 用户问题：{result.test_case.query}",
-                    f"- 结论：严格正确={strict_correct}；业务等价={business_correct}；SQL 契约={contract_passed}；可执行={execution_success}",
+                    f"- 结论：严格正确={strict_correct}；业务等价={business_correct}；SQL 契约={contract_passed}；评测器事后可执行={execution_success}；Agent 实际执行={agent_execution_success}",
                     f"- Schema Recall：{schema_label}",
                     f"- 工具调用 / Agent 延迟：{metadata.get('tool_call_count', len(result.agent_result.tool_calls))} 次 / {result.agent_result.execution_time_ms / 1000:.2f}s",
                     f"- 主要失败类型：{failure}",
@@ -890,7 +1102,8 @@ tbody tr:nth-child(even) {{ background: #fcfcfc; }}
   <div class="metric"><div class="label">Evaluator Pass Rate</div><div class="value">{self.pass_rate():.2%}</div></div>
   <div class="metric"><div class="label">Average Score</div><div class="value">{self.average_score():.2f}</div></div>
   <div class="metric"><div class="label">Schema Recall</div><div class="value">{self.average_schema_recall():.2%}</div></div>
-  <div class="metric"><div class="label">Execution Success Rate</div><div class="value">{self.execution_success_rate():.2%}</div></div>
+  <div class="metric"><div class="label">Evaluator SQL Re-execution</div><div class="value">{self.execution_success_rate():.2%}</div></div>
+  <div class="metric"><div class="label">Agent SQL Execution Success</div><div class="value">{self.agent_sql_execution_success_rate():.2%}</div></div>
   <div class="metric"><div class="label">Strict Result Correct Rate</div><div class="value">{self.result_correct_rate():.2%}</div></div>
   <div class="metric"><div class="label">Business Result Correct Rate</div><div class="value">{self.business_result_correct_rate():.2%}</div></div>
   <div class="metric"><div class="label">SQL Contract Pass Rate</div><div class="value">{self.sql_contract_pass_rate():.2%}</div></div>
@@ -1087,3 +1300,230 @@ class ComparisonReport(BaseModel):
 
     def best_by_score(self) -> str:
         return max(self.reports.items(), key=lambda item: item[1].average_score())[0]
+
+    def comparability_issues(self) -> List[str]:
+        """Return configuration differences that would invalidate an A/B claim."""
+        if not self.reports:
+            return ["no_reports"]
+        issues: List[str] = []
+        items = list(self.reports.items())
+        baseline_name, baseline = items[0]
+        baseline_ids = {item.test_case.id for item in baseline.results}
+        baseline_snapshot = baseline._config_snapshot()
+        controlled_fields = [
+            "dataset_hash",
+            "database_id",
+            "database_snapshot_id",
+            "dialect",
+            "schema_sync_mode",
+            "schema_snapshot_id",
+            "schema_search_default_limit",
+            "schema_search_default_threshold",
+            "schema_search_default_mode",
+            "allow_write_sql",
+            "agent_model",
+            "agent_provider",
+            "agent_temperature",
+            "max_tool_iterations",
+            "judge_model",
+            "judge_provider",
+            "pass_threshold",
+            "preview_rows",
+            "max_concurrency",
+        ]
+        required_fields = [
+            "dataset_hash",
+            "database_snapshot_id",
+            "schema_snapshot_id",
+            "agent_model",
+            "agent_provider",
+            "judge_model",
+            "judge_provider",
+        ]
+        for name, report in items:
+            snapshot = report._config_snapshot()
+            for field in required_fields:
+                if snapshot.get(field) in (None, ""):
+                    issues.append(f"missing:{field}:{name}")
+        for name, report in items[1:]:
+            report_ids = {item.test_case.id for item in report.results}
+            if report_ids != baseline_ids:
+                issues.append(f"test_case_ids:{baseline_name}!={name}")
+            if len(report.results) != len(baseline.results):
+                issues.append(f"sample_count:{baseline_name}!={name}")
+            snapshot = report._config_snapshot()
+            for field in controlled_fields:
+                if baseline_snapshot.get(field) != snapshot.get(field):
+                    issues.append(f"{field}:{baseline_name}!={name}")
+        return list(dict.fromkeys(issues))
+
+    def strategy_summaries(self) -> Dict[str, Dict[str, Any]]:
+        summaries: Dict[str, Dict[str, Any]] = {}
+        for label, report in self.reports.items():
+            report.enrich_metadata()
+            summaries[label] = {
+                "evaluation_mode": report._config_snapshot().get("evaluation_mode"),
+                "cases": len(report.results),
+                "strict_accuracy": report.result_correct_rate(),
+                "business_accuracy": report.business_result_correct_rate(),
+                "strict_wilson_95": report.accuracy_intervals()[
+                    "strict_result_correct"
+                ],
+                "business_wilson_95": report.accuracy_intervals()[
+                    "business_result_correct"
+                ],
+                "agent_sql_execution_success_rate": (
+                    report.agent_sql_execution_success_rate()
+                ),
+                "automatic_answer_coverage": report.automatic_answer_coverage(),
+                "wrong_executed_rate": report.wrong_executed_rate(),
+                "first_sql_result_correct_rate": (
+                    report.first_sql_result_correct_rate()
+                ),
+                "schema_recall": report.average_schema_recall(),
+                "p50_agent_execution_time_ms": report.p50_agent_execution_time(),
+                "p95_agent_execution_time_ms": report.p95_agent_execution_time(),
+                "average_tool_calls": report.average_tool_calls(),
+                "tool_call_totals": report.tool_call_totals(),
+                "recovery_yield": report.recovery_yield(),
+                "false_block_rate": report.false_block_rate(),
+                "plan_acceptance_precision": report.plan_acceptance_precision(),
+                "estimated_cost_usd": report.total_estimated_cost_usd(),
+                "cost_per_strict_correct_usd": report.cost_per_correct_usd(),
+                "cost_per_business_correct_usd": report.cost_per_correct_usd(
+                    business=True
+                ),
+                "repeat_stability": report.repeat_stability(),
+            }
+        return summaries
+
+    def deltas_from(self, baseline_label: str = "s0") -> Dict[str, Dict[str, Any]]:
+        if baseline_label not in self.reports:
+            return {}
+        baseline = self.reports[baseline_label]
+        baseline_strict_count = sum(
+            bool(
+                item.metadata.get(
+                    "verified_result_correct",
+                    item.metadata.get("result_correct"),
+                )
+            )
+            for item in baseline.results
+        )
+        baseline_cost = baseline.total_estimated_cost_usd()
+        deltas: Dict[str, Dict[str, Any]] = {}
+        for label, report in self.reports.items():
+            if label == baseline_label:
+                continue
+            strict_count = sum(
+                bool(
+                    item.metadata.get(
+                        "verified_result_correct",
+                        item.metadata.get("result_correct"),
+                    )
+                )
+                for item in report.results
+            )
+            extra_correct = strict_count - baseline_strict_count
+            extra_seconds = (
+                sum(item.agent_result.execution_time_ms for item in report.results)
+                - sum(
+                    item.agent_result.execution_time_ms for item in baseline.results
+                )
+            ) / 1000
+            report_cost = report.total_estimated_cost_usd()
+            extra_cost = (
+                report_cost - baseline_cost
+                if report_cost is not None and baseline_cost is not None
+                else None
+            )
+            deltas[label] = {
+                "strict_accuracy_delta": (
+                    report.result_correct_rate() - baseline.result_correct_rate()
+                ),
+                "business_accuracy_delta": (
+                    report.business_result_correct_rate()
+                    - baseline.business_result_correct_rate()
+                ),
+                "p95_latency_delta_ms": (
+                    report.p95_agent_execution_time()
+                    - baseline.p95_agent_execution_time()
+                ),
+                "extra_strict_correct_cases": extra_correct,
+                "extra_agent_seconds": extra_seconds,
+                "extra_seconds_per_extra_correct": (
+                    extra_seconds / extra_correct if extra_correct > 0 else None
+                ),
+                "extra_cost_usd": extra_cost,
+                "extra_cost_per_extra_correct_usd": (
+                    extra_cost / extra_correct
+                    if extra_cost is not None and extra_correct > 0
+                    else None
+                ),
+            }
+        return deltas
+
+    def save_json(self, path: str | Path) -> None:
+        payload = {
+            "timestamp": self.timestamp.isoformat(),
+            "comparable": not self.comparability_issues(),
+            "comparability_issues": self.comparability_issues(),
+            "strategy_summaries": self.strategy_summaries(),
+            "deltas_from_s0": self.deltas_from("s0"),
+        }
+        Path(path).write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def save_markdown(self, path: str | Path) -> None:
+        issues = self.comparability_issues()
+        summaries = self.strategy_summaries()
+        lines = [
+            "# Text2SQL S0/S1/S2 对比报告",
+            "",
+            f"- 生成时间：{self.timestamp.isoformat()}",
+            f"- 是否可公平比较：{'是' if not issues else '否'}",
+        ]
+        if issues:
+            lines.append(f"- 不可比原因：{', '.join(issues)}")
+        lines.extend(
+            [
+                "",
+                "| 模式 | 样本 | 严格准确率 | 业务准确率 | P50 / P95 延迟 | 错误但已执行 | 平均工具数 | 估算成本 |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for label, summary in summaries.items():
+            cost = summary["estimated_cost_usd"]
+            cost_label = f"${cost:.6f}" if cost is not None else "未配置"
+            lines.append(
+                f"| {label} | {summary['cases']} | "
+                f"{summary['strict_accuracy']:.2%} | "
+                f"{summary['business_accuracy']:.2%} | "
+                f"{summary['p50_agent_execution_time_ms'] / 1000:.2f}s / "
+                f"{summary['p95_agent_execution_time_ms'] / 1000:.2f}s | "
+                f"{summary['wrong_executed_rate']:.2%} | "
+                f"{summary['average_tool_calls']:.2f} | {cost_label} |"
+            )
+        lines.extend(["", "## 相对 S0 的增量", ""])
+        for label, delta in self.deltas_from("s0").items():
+            seconds_per_correct = delta["extra_seconds_per_extra_correct"]
+            seconds_label = (
+                f"{seconds_per_correct:.2f}s"
+                if seconds_per_correct is not None
+                else "没有增加严格正确题"
+            )
+            lines.extend(
+                [
+                    f"### {label}",
+                    "",
+                    f"- 严格准确率变化：{delta['strict_accuracy_delta']:+.2%}",
+                    f"- 业务准确率变化：{delta['business_accuracy_delta']:+.2%}",
+                    f"- P95 延迟变化：{delta['p95_latency_delta_ms'] / 1000:+.2f}s",
+                    f"- 新增严格正确题：{delta['extra_strict_correct_cases']}",
+                    f"- 每新增一个严格正确答案的额外时间：{seconds_label}",
+                    "",
+                ]
+            )
+        Path(path).write_text("\n".join(lines), encoding="utf-8")

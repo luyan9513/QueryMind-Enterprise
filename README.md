@@ -219,7 +219,7 @@ The upstream project already provided the evaluation runner, resumable batch CLI
 
 ```bash
 cd /Users/luyan/Documents/Projects/01-QueryMind/repo/QueryMind-personal
-EVAL_DATASET_PATH=evals/datasets/adventureworks_business_zh.yaml \
+EVAL_DATASET_PATH=src/evals/datasets/adventureworks_business_zh.yaml \
   .venv/bin/python my_evaluation.py
 ```
 
@@ -233,7 +233,52 @@ The next iteration adds explicit result-comparison policies, SQL output contract
 
 Five real-model experiments were retained, including regressions and one interrupted low-temperature run. The final DeepSeek v4 Pro run completed 24/24 cases with 100.00% final SQL execution, 37.50% strict result correctness, 54.17% business-equivalent correctness, 33.33% first-SQL strict correctness, 75.00% Schema Recall, and 3.88 average tool calls. Compared with the Flash baseline, strict correctness increased by 8.33 percentage points and average tool calls fell by 49.5%, while estimated model cost rose from USD 0.064537 to USD 0.145265 (about 2.25x).
 
-These figures apply only to the frozen 24-case AdventureWorks benchmark and the recorded model configuration. They are not a guarantee for arbitrary databases. New data sources require their own schema initialization, business definitions, frozen benchmark, and baseline. The latest formal Python test scope is `142 passed, 1 warning`.
+These figures apply only to the frozen 24-case AdventureWorks benchmark and the recorded model configuration. They are not a guarantee for arbitrary databases. New data sources require their own schema initialization, business definitions, frozen benchmark, and baseline.
+
+### v0.3 Schema-Grounded Query Planning
+
+The v0.3 worktree keeps the upstream Agent Loop and adds a `submit_query_plan` stage between schema retrieval and SQL execution. A turn-local evidence set records retrieved physical tables, columns, and primary keys. The runtime rejects plans without evidence and rejects SQL that drifts from the accepted tables, fields, filters, output shape, aggregation, grouping, ordering, or limit.
+
+Schema recovery now supports direct lookup by known physical table names, qualified-field normalization, exact-field-first search, field-coverage ranking, complete graph-result hydration, and full-field display for exact lookups. The evaluation report also separates evaluator-side SQL re-execution from SQL actually accepted and executed inside the Agent.
+
+The final three-case DeepSeek v4 Pro smoke run reached 100.00% strict/business correctness, SQL Contract, Schema Recall, and Agent SQL execution success; first-SQL correctness was 66.67% and average Agent time was 28.30 seconds. This is a recovery-path smoke test, not a replacement for the frozen 24-case benchmark and not a cross-database accuracy claim. See [the v0.3 design and evidence note](docs/portfolio/v0.3-query-plan-recovery.md).
+
+### v0.4 Accuracy and Agent Value Harness
+
+The v0.4 harness now isolates three evaluation strategies without changing the production chat entry point:
+
+- `s0`: one fixed-budget Schema Memory retrieval, one LLM SQL generation, and one governed SQL attempt; no Agent Loop or repair.
+- `s1`: the upstream Agent Loop, SQL Governance, Schema Memory, and recovery, without registering the portfolio Query Plan tool.
+- `s2`: the same Agent path with the portfolio Query Plan evidence gate enabled.
+
+Each checkpoint stores its mode, and resume lookup refuses to mix modes. Reports now include P50/P95/max latency, per-tool totals, 95% Wilson intervals, wrong-but-executed rate, Recovery Yield, False Block Rate, and Plan Acceptance Precision. A separate comparison command rejects A/B claims when the dataset, model, database, judge, temperature, concurrency, or test-case IDs differ.
+
+```bash
+export EVAL_DATABASE_SNAPSHOT_ID=adventureworks_20260729
+export EVAL_SCHEMA_SNAPSHOT_ID=adventureworks_schema_20260729
+
+EVAL_MODE=s0 .venv/bin/python my_evaluation.py --run-id aw_s0_r1
+EVAL_MODE=s1 .venv/bin/python my_evaluation.py --run-id aw_s1_r1
+EVAL_MODE=s2 .venv/bin/python my_evaluation.py --run-id aw_s2_r1
+
+PYTHONPATH=src .venv/bin/python -m evals.compare_runs \
+  --s0-report eval_output/eval_results/<s0-run>/evaluation_report.json \
+  --s1-report eval_output/eval_results/<s1-run>/evaluation_report.json \
+  --s2-report eval_output/eval_results/<s2-run>/evaluation_report.json \
+  --output-dir eval_output/comparisons/aw_r1
+```
+
+The first controlled real-model round is complete: 24 frozen questions per mode, 72 samples in total, with the comparison checker reporting `comparable=true`.
+
+| Mode | Strict accuracy | Business accuracy | Wrong but executed | Average / P95 latency |
+|---|---:|---:|---:|---:|
+| S0 | 20.83% | 25.00% | 62.50% | 2.01s / 2.65s |
+| S1 | 33.33% | 41.67% | 54.17% | 17.09s / 26.58s |
+| S2 | 50.00% | 54.17% | 41.67% | 29.98s / 53.13s |
+
+This is evidence of an observed gain on one AdventureWorks run, not a general accuracy guarantee. S2 is not ready to become the unconditional default: 41.67% of cases still executed an incorrect answer, its P95 latency exceeded 53 seconds, and only one run per mode has been completed. The generated detailed reports retain every question, reference SQL, Agent SQL, failure location, cause, and recommendation while omitting result rows and judge raw text.
+
+The latest formal Python test scope is `167 passed, 1 warning`.
 
 ### Web Component
 
@@ -258,23 +303,24 @@ The handbook expands the README into components, advanced-features, use-case, an
 
 ### Ongoing
 
-1. Generalize the metadata-loop breaker into a failure analyzer that routes schema, join, aggregation, output-contract, permission, and provider failures to explicit recovery strategies. Validate the same generic logic on a second data source with its own frozen benchmark.
+1. Use the completed S0/S1/S2 result to design a risk-based fast/slow route, reduce Query Plan false blocks, and rerun each mode three times before making the Agent the default path. See [the v0.4 validation plan](docs/portfolio/v0.4-accuracy-performance-validation-plan.md) and [the implementation record](docs/portfolio/v0.4-evaluation-harness-implementation.md).
 
 <figure>
   <img src="docs/figures/use-cases/eval-driven%20iterations.png" alt="Eval-driven iterations" />
   <figcaption>Eval-driven iterations: use benchmark feedback to refine prompts, governance, and SQL recovery behavior.</figcaption>
 </figure>
 
-2. Evaluate QueryMind against BIRD-SQL to measure text-to-SQL capability.
+2. Establish a second data source with its own [accuracy admission contract](docs/portfolio/data-source-accuracy-contract-template.md), semantic definitions, frozen benchmark, and confidence/abstention metrics before making any cross-database accuracy claim.
 
 
 ### Future Actions
 
-1. Explore Agentic RL on top of QueryMind.
-2. Improve schema retrieval query rewriting so complex user questions can be split into multiple schema-retrieve calls, reducing the chance that multi-table or multi-field descriptions get compressed into a single query and fall into a retrieval dead-end.
-3. Explore alternative schema retrieval / indexing architectures, including PageIndex-style reasoning-first, vector-light or vector-free RAG approaches and stronger multi-hop schema retrieval over the business schema graph.
-4. Add business-level scoping options, such as manual business-domain selection, to narrow the schema-retrieve search space before retrieval starts.
-5. Keep tightening the agent with evaluation results and governance feedback.
+1. Evaluate QueryMind against BIRD-SQL after checking the latest official dataset, license, format, and scoring documentation.
+2. Explore Agentic RL on top of QueryMind only after a reliable multi-source evaluation baseline exists.
+3. Improve schema retrieval query rewriting so complex user questions can be split into multiple schema-retrieve calls, reducing the chance that multi-table or multi-field descriptions get compressed into a single query and fall into a retrieval dead-end.
+4. Explore alternative schema retrieval / indexing architectures, including PageIndex-style reasoning-first, vector-light or vector-free RAG approaches and stronger multi-hop schema retrieval over the business schema graph.
+5. Add business-level scoping options, such as manual business-domain selection, to narrow the schema-retrieve search space before retrieval starts.
+6. Keep tightening the agent with evaluation results and governance feedback.
 
 <a id="license"></a>
 

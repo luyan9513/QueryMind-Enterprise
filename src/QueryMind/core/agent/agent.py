@@ -47,6 +47,7 @@ from QueryMind.capabilities.agent_memory import AgentMemory
 from QueryMind.capabilities.schema_memory import SchemaMemory
 from QueryMind.capabilities.schema_management import SchemaManagementService
 from .conversation_title import ensure_conversation_title
+from .query_plan import build_schema_evidence
 
 import logging
 
@@ -80,6 +81,25 @@ used. Do not call tools again in this turn. Explain which business field or
 definition is still missing and ask the user for a concise clarification.
 Never guess a query from unsupported schema evidence.
 """.strip()
+_QUERY_PLAN_RECOVERY_PROMPT = """
+## Query Plan Recovery
+
+The previous SQL or query plan was rejected by the runtime planning gate.
+`run_sql` is temporarily unavailable. Use `schema_retrieve` if evidence is
+missing, then call `submit_query_plan` with only retrieved physical tables and
+qualified columns. When the rejection names a physical table, pass it through
+`schema_retrieve.table_names` for an exact Schema Memory lookup. Otherwise use
+focused `required_fields`. Keep the exact requested output columns and resolve
+every listed mismatch before trying SQL again.
+""".strip()
+_QUERY_PLAN_RECOVERY_EXHAUSTED_PROMPT = """
+## Query Plan Recovery Exhausted
+
+The query plan could not be grounded or aligned after repeated attempts. Do
+not call tools again in this turn. Explain the missing schema evidence or
+business definition and ask one concise clarification question instead of
+guessing.
+""".strip()
 
 
 def _normalize_sql_text(sql: str) -> str:
@@ -99,6 +119,18 @@ def _metadata_recovery_tools(tool_schemas: List[ToolSchema]) -> List[ToolSchema]
     return [tool for tool in tool_schemas if tool.name == "schema_retrieve"]
 
 
+def _is_query_plan_rejection(result: ToolResult) -> bool:
+    return (
+        not result.success
+        and str(result.metadata.get("rejection_stage") or "") == "planning"
+    )
+
+
+def _query_plan_recovery_tools(tool_schemas: List[ToolSchema]) -> List[ToolSchema]:
+    allowed = {"schema_retrieve", "submit_query_plan"}
+    return [tool for tool in tool_schemas if tool.name in allowed]
+
+
 def _append_metadata_recovery_prompt(
     system_prompt: Optional[str],
     *,
@@ -108,6 +140,21 @@ def _append_metadata_recovery_prompt(
         _METADATA_RECOVERY_EXHAUSTED_PROMPT
         if exhausted
         else _METADATA_RECOVERY_PROMPT
+    )
+    return "\n\n".join(
+        part for part in [system_prompt or "", recovery_prompt] if part
+    )
+
+
+def _append_query_plan_recovery_prompt(
+    system_prompt: Optional[str],
+    *,
+    exhausted: bool = False,
+) -> str:
+    recovery_prompt = (
+        _QUERY_PLAN_RECOVERY_EXHAUSTED_PROMPT
+        if exhausted
+        else _QUERY_PLAN_RECOVERY_PROMPT
     )
     return "\n\n".join(
         part for part in [system_prompt or "", recovery_prompt] if part
@@ -202,6 +249,14 @@ def _build_live_schema_snapshot(
     selected_table_refs = _normalize_schema_table_refs(
         metadata.get("selected_table_refs") or []
     )
+    selected_columns = metadata.get("selected_columns")
+    if not isinstance(selected_columns, dict):
+        selected_columns = {}
+    selected_column_refs = [
+        str(column).strip()
+        for column in (metadata.get("selected_column_refs") or [])
+        if str(column).strip()
+    ]
     query = str(metadata.get("query") or "")
     search_mode = str(metadata.get("search_mode") or "unknown")
     graph_hint = str(metadata.get("graph_hint") or "none")
@@ -239,6 +294,8 @@ def _build_live_schema_snapshot(
         "total_results": total_results,
         "selected_tables": selected_tables,
         "selected_table_refs": selected_table_refs,
+        "selected_columns": dict(selected_columns),
+        "selected_column_refs": selected_column_refs,
         "required_fields": required_fields,
         "domain_filter": domain_filter,
         "schema_locked": schema_locked,
@@ -249,6 +306,8 @@ def _build_live_schema_snapshot(
     schema_context = {
         "seed_tables": selected_tables,
         "seed_table_refs": selected_table_refs,
+        "selected_columns": dict(selected_columns),
+        "selected_column_refs": selected_column_refs,
         "expand_mode": bool(selected_tables),
         "last_query": query,
         "last_search_mode": search_mode,
@@ -951,6 +1010,8 @@ class Agent:
         metadata_query_rejections = 0
         metadata_recovery_pending = False
         metadata_recovery_attempts = 0
+        query_plan_rejections = 0
+        query_plan_recovery_pending = False
         all_tool_results: List[Dict[str, Any]] = []
         request_metadata = {
             **dict(request_context.metadata or {}),
@@ -1005,6 +1066,28 @@ class Agent:
             else:
                 request_metadata.pop("metadata_query_recovery", None)
                 request_metadata.pop("metadata_query_recovery_exhausted", None)
+
+            query_plan_recovery_turn = query_plan_recovery_pending
+            if query_plan_recovery_turn:
+                recovery_exhausted = (
+                    query_plan_rejections >= self.config.max_query_plan_retries
+                )
+                visible_tool_schemas = (
+                    []
+                    if recovery_exhausted
+                    else _query_plan_recovery_tools(visible_tool_schemas)
+                )
+                system_prompt = _append_query_plan_recovery_prompt(
+                    system_prompt,
+                    exhausted=recovery_exhausted,
+                )
+                request_metadata["query_plan_recovery"] = True
+                request_metadata["query_plan_recovery_exhausted"] = recovery_exhausted
+                request_metadata["query_plan_rejections"] = query_plan_rejections
+            else:
+                request_metadata.pop("query_plan_recovery", None)
+                request_metadata.pop("query_plan_recovery_exhausted", None)
+                request_metadata.pop("query_plan_rejections", None)
 
             if self.observability_provider and prompt_span:
                 prompt_span.set_attribute(
@@ -1277,7 +1360,14 @@ class Agent:
                                         "phase": "after_tool",
                                         "tool": tool_call.name,
                                     },
-                                )
+                            )
+
+                    if _is_query_plan_rejection(result):
+                        query_plan_rejections += 1
+                        query_plan_recovery_pending = True
+                    elif tool_call.name == "submit_query_plan" and result.success:
+                        query_plan_rejections = 0
+                        query_plan_recovery_pending = False
 
                     if tool_call.name == "schema_retrieve":
                         live_schema_snapshot = _build_live_schema_snapshot(
@@ -1285,9 +1375,29 @@ class Agent:
                             success=result.success,
                         )
                         if live_schema_snapshot:
+                            live_schema_snapshot["schema_evidence"] = (
+                                build_schema_evidence(
+                                    context.metadata,
+                                    result.metadata,
+                                )
+                            )
                             result.metadata.update(live_schema_snapshot)
                             context.metadata.update(live_schema_snapshot)
                             request_metadata.update(live_schema_snapshot)
+                    if tool_call.name == "submit_query_plan":
+                        query_plan_snapshot = {
+                            key: result.metadata[key]
+                            for key in (
+                                "query_plan",
+                                "query_plan_status",
+                                "query_plan_issues",
+                                "query_plan_evidence",
+                            )
+                            if key in result.metadata
+                        }
+                        if query_plan_snapshot:
+                            context.metadata.update(query_plan_snapshot)
+                            request_metadata.update(query_plan_snapshot)
                     if tool_call.name == "run_sql":
                         live_sql_snapshot = _build_live_sql_snapshot(
                             result.metadata,

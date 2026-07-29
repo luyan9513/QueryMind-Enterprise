@@ -9,8 +9,10 @@ from evals.bootstrap import (  # noqa: E402
     DEFAULT_RESULTS_ROOT,
     DEFAULT_RESUME_ROOT,
     resolve_agent_temperature,
+    resolve_evaluation_mode,
     resolve_evaluation_providers,
 )
+from QueryMind.core.evaluation import EvaluationMode  # noqa: E402
 import evals.bootstrap as bootstrap  # noqa: E402
 
 
@@ -55,6 +57,12 @@ def test_agent_temperature_defaults_to_deterministic_and_is_validated(monkeypatc
         assert "between 0.0 and 2.0" in str(exc)
     else:  # pragma: no cover - defensive assertion
         raise AssertionError("out-of-range temperature should fail")
+
+
+def test_evaluation_mode_prefers_explicit_value_then_env(monkeypatch) -> None:
+    monkeypatch.setenv("EVAL_MODE", "s1")
+    assert resolve_evaluation_mode() == EvaluationMode.S1_AGENT_WITHOUT_PLAN
+    assert resolve_evaluation_mode("s0") == EvaluationMode.S0_SINGLE_SHOT
 
 
 def test_load_environment_preserves_explicit_run_configuration(

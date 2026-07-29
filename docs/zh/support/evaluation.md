@@ -63,6 +63,38 @@ my-evaluation \
 my-evaluation --resume-latest
 ```
 
+### S0/S1/S2 对照模式
+
+v0.4 支持三种相互隔离的运行模式：
+
+- `s0`：一次 Schema 检索、一次模型 SQL 生成、一次 SQL 尝试，不使用 Agent Loop，也不修复。
+- `s1`：使用 Agent Loop、Schema Memory、SQL Governance 和恢复，但不注册 Query Plan 工具。
+- `s2`：在 S1 基础上启用 Query Plan 证据门禁和计划恢复；这是当前默认值。
+
+```bash
+my-evaluation --evaluation-mode s0 --run-id aw_s0_r1
+my-evaluation --evaluation-mode s1 --run-id aw_s1_r1
+my-evaluation --evaluation-mode s2 --run-id aw_s2_r1
+```
+
+也可以使用 `EVAL_MODE=s0|s1|s2`。模式会写入 checkpoint；恢复点不会跨模式复用。
+
+三组完成后运行：
+
+```bash
+PYTHONPATH=src .venv/bin/python -m evals.compare_runs \
+  --s0-report <S0 evaluation_report.json> \
+  --s1-report <S1 evaluation_report.json> \
+  --s2-report <S2 evaluation_report.json> \
+  --output-dir eval_output/comparisons/adventureworks_r1
+```
+
+对比器会检查题目、数据集 hash、模型、Provider、temperature、数据库、Judge、阈值和并发配置。任一关键项不一致时，报告会标记为不可公平比较。
+
+2026-07-29 的首轮真实对照使用冻结 24 题、DeepSeek v4 Pro Agent 和 DeepSeek v4 Flash Judge，公平性检查通过。S0/S1/S2 严格正确率分别为 20.83%/33.33%/50.00%，业务正确率为 25.00%/41.67%/54.17%；相应平均延迟为 2.01/17.09/29.98 秒，S2 P95 为 53.13 秒。该结果只代表当前单轮 AdventureWorks 题集，不能外推到新数据源，也不能把 95.83% 的 SQL 实际执行率写成答案准确率。
+
+三组 `evaluation_detailed.md` 会逐题记录参考 SQL、Agent SQL、错误位置、原因和改进建议，并移除结果行和 Judge 原文。
+
 从已有运行生成报告：
 
 ```bash
@@ -73,6 +105,7 @@ python evals/generate_report.py --latest --resume-root evals/resume_points
 
 - `EVAL_DATASET_PATH`
 - `EVAL_OUTPUT_DIR`
+- `EVAL_MODE`
 - `EVAL_MAX_CONCURRENCY`
 - `EVAL_MAX_TOOL_ITERATIONS`
 - `EVAL_PASS_THRESHOLD`

@@ -22,6 +22,7 @@ from QueryMind.components.rich.schema_retrieve import (
 )
 from QueryMind.components.simple import SimpleTextComponent
 from QueryMind.capabilities.schema_memory import SchemaMemory
+from QueryMind.capabilities.schema_memory.models import SchemaSearchResult
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class SearchMode(str, Enum):
     GRAPH = "graph"  # FK relationship exploration
     HYBRID = "hybrid"  # Balanced mode (default)
     EXPAND = "expand"  # Seed-based expansion
+    DIRECT = "direct"  # Exact physical table lookup through table_names
 
 
 class GraphHint(str, Enum):
@@ -53,6 +55,7 @@ SCHEMA_MEMORY_SEARCH_MODE_MAP = {
     SearchMode.GRAPH: "graph_only",
     SearchMode.HYBRID: "hybrid",
     SearchMode.EXPAND: "graph_expand",
+    SearchMode.DIRECT: "hybrid",
 }
 
 
@@ -64,17 +67,21 @@ def _normalize_table_ref(table_ref: str) -> Optional[Dict[str, Any]]:
 
     parts = [part for part in cleaned.split(".") if part]
     if len(parts) >= 3:
+        database_name = ".".join(parts[:-2])
         schema_name = parts[-2]
         table_name = parts[-1]
     elif len(parts) == 2:
+        database_name = None
         schema_name, table_name = parts
     elif len(parts) == 1:
+        database_name = None
         schema_name = "public"
         table_name = parts[0]
     else:
         return None
 
     return {
+        "database_name": database_name,
         "schema_name": schema_name,
         "table_name": table_name,
         "full_name": cleaned,
@@ -123,12 +130,13 @@ class SchemaRetrieveToolArgs(BaseModel):
     """
 
     query: str = Field(
+        default="",
         description="Natural language query for finding relevant tables, e.g., 'find tables related to customer analysis'"
     )
 
     search_mode: Optional[SearchMode] = Field(
         default=None,
-        description="Search mode: hybrid (default), vector, graph, or expand. See system prompt for selection rules."
+        description="Search mode: hybrid (default), vector, graph, expand, or direct when table_names are known."
     )
 
     limit: int = Field(
@@ -158,6 +166,14 @@ class SchemaRetrieveToolArgs(BaseModel):
     required_fields: List[str] = Field(
         default_factory=list,
         description="Required field names when graph_hint=fields"
+    )
+
+    table_names: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Exact physical table names already known from schema evidence or a "
+            "rejected query plan, for example sales.orders"
+        ),
     )
 
     seed_tables: List[str] = Field(
@@ -219,6 +235,8 @@ Search for table schemas based on business semantics. Supports multiple search m
 - vector: Semantic similarity search
 - graph: FK relationship exploration
 - expand: Expand from seed tables (provided by system)
+- direct: Exact lookup of the physical names in table_names
+When exact physical table names are already known, pass table_names to fetch them directly.
 """
 
     @property
@@ -245,6 +263,7 @@ Search for table schemas based on business semantics. Supports multiple search m
         search_mode = args.search_mode or SearchMode.HYBRID
         effective_search_mode = search_mode
         required_fields = _normalize_field_list(args.required_fields)
+        exact_table_refs = _normalize_table_refs(args.table_names)
         seed_table_refs = _normalize_table_refs(args.seed_tables)
         context_schema_retrieve = (
             context.metadata.get("schema_retrieve_context", {})
@@ -255,6 +274,11 @@ Search for table schemas based on business semantics. Supports multiple search m
         context_seed_table_refs = context_schema_retrieve.get("seed_table_refs", [])
 
         try:
+            if not exact_table_refs and not args.query.strip():
+                raise ValueError(
+                    "query is required when table_names is not provided"
+                )
+
             seed_table_refs.extend(_normalize_table_refs(context_seed_tables))
             if context_seed_table_refs:
                 for ref in context_seed_table_refs:
@@ -312,26 +336,55 @@ Search for table schemas based on business semantics. Supports multiple search m
                 f"(requested={requested_limit})"
             )
 
-            # Perform schema search
-            results = await self._schema_memory.search_schema(
-                query=args.query,
-                context=context,
-                search_mode=memory_search_mode,
-                limit=effective_limit,
-                similarity_threshold=args.similarity_threshold,
-                domain_filter=args.domain_filter,
-                required_fields=required_fields or None,
-                seed_tables=[ref["full_name"] for ref in seed_table_refs]
-                if effective_search_mode == SearchMode.EXPAND
-                else None,
-            )
+            missing_exact_tables: List[str] = []
+            if exact_table_refs:
+                results = []
+                for ref in exact_table_refs[:effective_limit]:
+                    table_schema = await self._schema_memory.get_table_schema(
+                        table_name=ref["table_name"],
+                        schema_name=ref["schema_name"],
+                        database_name=ref["database_name"],
+                        context=context,
+                    )
+                    if table_schema is None:
+                        missing_exact_tables.append(ref["full_name"])
+                        continue
+                    results.append(
+                        SchemaSearchResult(
+                            table_schema=table_schema,
+                            similarity_score=1.0,
+                            rank=len(results) + 1,
+                            match_reason="Exact physical table lookup",
+                        )
+                    )
+            else:
+                # Perform semantic/graph schema search.
+                results = await self._schema_memory.search_schema(
+                    query=args.query,
+                    context=context,
+                    search_mode=memory_search_mode,
+                    limit=effective_limit,
+                    similarity_threshold=args.similarity_threshold,
+                    domain_filter=args.domain_filter,
+                    required_fields=required_fields or None,
+                    seed_tables=[ref["full_name"] for ref in seed_table_refs]
+                    if effective_search_mode == SearchMode.EXPAND
+                    else None,
+                )
 
             # Format results for LLM
             llm_content = self._format_result_for_llm(
                 results=results,
                 search_mode=effective_search_mode,
-                query=args.query
+                query=args.query,
+                required_fields=required_fields,
+                include_all_fields=bool(exact_table_refs),
             )
+            if missing_exact_tables:
+                llm_content += (
+                    "\nExact table names not found in Schema Memory: "
+                    + ", ".join(missing_exact_tables)
+                )
 
             # Build UI component
             ui_component = self._build_ui_component(
@@ -342,6 +395,9 @@ Search for table schemas based on business semantics. Supports multiple search m
 
             selected_tables = [result.table_schema.full_name for result in results if result.table_schema]
             selected_table_refs = []
+            selected_columns = {}
+            selected_primary_keys = {}
+            selected_column_refs = []
             for result in results:
                 schema = result.table_schema
                 if not schema:
@@ -353,6 +409,19 @@ Search for table schemas based on business semantics. Supports multiple search m
                         "schema_name": schema.schema_name,
                         "table_name": schema.table_name,
                     }
+                )
+                field_names = [
+                    field.field_name
+                    for field in schema.field_definitions
+                    if field.field_name
+                ]
+                selected_columns[schema.full_name] = field_names
+                selected_primary_keys[schema.full_name] = list(
+                    schema.primary_key_fields
+                )
+                selected_column_refs.extend(
+                    f"{schema.full_name}.{field_name}"
+                    for field_name in field_names
                 )
 
             # Build metadata
@@ -366,8 +435,13 @@ Search for table schemas based on business semantics. Supports multiple search m
                 "effective_limit": effective_limit,
                 "selected_tables": selected_tables,
                 "selected_table_refs": selected_table_refs,
+                "selected_columns": selected_columns,
+                "selected_primary_keys": selected_primary_keys,
+                "selected_column_refs": selected_column_refs,
                 "domain_filter": args.domain_filter,
                 "required_fields": required_fields,
+                "exact_table_names": [ref["full_name"] for ref in exact_table_refs],
+                "missing_exact_tables": missing_exact_tables,
                 "seed_tables": [ref["full_name"] for ref in seed_table_refs],
             }
 
@@ -391,8 +465,13 @@ Search for table schemas based on business semantics. Supports multiple search m
                 "effective_limit": min(args.limit, self._max_initial_results),
                 "selected_tables": [],
                 "selected_table_refs": [],
+                "selected_columns": {},
+                "selected_primary_keys": {},
+                "selected_column_refs": [],
                 "domain_filter": args.domain_filter,
                 "required_fields": required_fields,
+                "exact_table_names": [ref["full_name"] for ref in exact_table_refs],
+                "missing_exact_tables": [ref["full_name"] for ref in exact_table_refs],
                 "seed_tables": [ref["full_name"] for ref in seed_table_refs],
             }
 
@@ -408,7 +487,9 @@ Search for table schemas based on business semantics. Supports multiple search m
         self,
         results: List[Any],
         search_mode: SearchMode,
-        query: str
+        query: str,
+        required_fields: Optional[List[str]] = None,
+        include_all_fields: bool = False,
     ) -> str:
         """Format search results for LLM consumption.
 
@@ -438,8 +519,25 @@ Search for table schemas based on business semantics. Supports multiple search m
             lines.append(f"Description: {schema.business_context.description}")
             lines.append("Fields:")
 
-            # Limit fields to first 15 for context length
-            for field in schema.field_definitions[:15]:
+            fields_to_display = list(schema.field_definitions)
+            if not include_all_fields:
+                fields_to_display = fields_to_display[:15]
+                required_names = {
+                    str(field_name).strip().strip("`\"[]").split(".")[-1].lower()
+                    for field_name in (required_fields or [])
+                    if str(field_name).strip()
+                }
+                displayed_names = {
+                    field.field_name.lower() for field in fields_to_display
+                }
+                fields_to_display.extend(
+                    field
+                    for field in schema.field_definitions[15:]
+                    if field.field_name.lower() in required_names
+                    and field.field_name.lower() not in displayed_names
+                )
+
+            for field in fields_to_display:
                 pk = " [PK]" if field.is_primary_key else ""
                 fk = " [FK]" if field.is_foreign_key else ""
                 desc = field.business_meaning or field.description or ""
@@ -476,12 +574,14 @@ Search for table schemas based on business semantics. Supports multiple search m
             SearchMode.VECTOR: "🔍 Vector Search",
             SearchMode.GRAPH: "🔗 Graph Search",
             SearchMode.EXPAND: "🌱 Expand Search",
+            SearchMode.DIRECT: "🎯 Direct Table Lookup",
         }
         similarity_label_by_mode = {
             SearchMode.HYBRID: "Similarity (RRF Score ×100)",
             SearchMode.VECTOR: "Similarity (Cosine-Based)",
             SearchMode.GRAPH: "Graph Match",
             SearchMode.EXPAND: "Similarity (Hop-Based)",
+            SearchMode.DIRECT: "Exact Schema Memory Match",
         }
 
         # Build table display list
