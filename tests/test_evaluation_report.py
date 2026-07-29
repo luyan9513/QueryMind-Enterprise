@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from evals.compare_runs import load_report  # noqa: E402
 from QueryMind.core.evaluation import (  # noqa: E402
     AgentResult,
     ComparisonReport,
@@ -14,7 +15,6 @@ from QueryMind.core.evaluation import (  # noqa: E402
     SqlTestCase,
     ToolInvocationRecord,
 )
-from evals.compare_runs import load_report  # noqa: E402
 
 
 def _make_result(
@@ -276,6 +276,18 @@ def test_agent_value_metrics_and_wilson_intervals_are_exported() -> None:
             tool_call_id="sql",
             tool_name="run_sql",
             success=True,
+            metadata={
+                "query_plan_routing": {
+                    "mode": "adaptive",
+                    "route": "fast",
+                }
+            },
+        ),
+        ToolInvocationRecord(
+            tool_call_id="schema",
+            tool_name="schema_retrieve",
+            success=True,
+            metadata={"schema_query_fallback_used": True},
         ),
     ]
     blocked = _make_result(
@@ -305,7 +317,13 @@ def test_agent_value_metrics_and_wilson_intervals_are_exported() -> None:
     assert metrics["wrong_executed_rate"] == 0.5
     assert metrics["p50_agent_execution_time_ms"] == 2000.0
     assert metrics["max_agent_execution_time_ms"] == 3000.0
-    assert metrics["tool_call_totals"] == {"run_sql": 1, "submit_query_plan": 1}
+    assert metrics["tool_call_totals"] == {
+        "run_sql": 1,
+        "schema_retrieve": 1,
+        "submit_query_plan": 1,
+    }
+    assert metrics["query_plan_route_totals"] == {"fast": 1}
+    assert metrics["schema_query_fallback_count"] == 1
     assert metrics["accuracy_wilson_95"]["strict_result_correct"]["rate"] == 0.5
 
 

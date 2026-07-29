@@ -263,6 +263,26 @@ class EvaluationReport(BaseModel):
             counter.update(call.tool_name for call in item.agent_result.tool_calls)
         return dict(sorted(counter.items()))
 
+    def query_plan_route_totals(self) -> Dict[str, int]:
+        """Count adaptive fast/plan decisions recorded on run_sql attempts."""
+        counter: Counter[str] = Counter()
+        for item in self.results:
+            for call in item.agent_result.get_tool_calls("run_sql"):
+                routing = call.metadata.get("query_plan_routing")
+                if not isinstance(routing, dict):
+                    continue
+                route = str(routing.get("route") or "").strip()
+                if route:
+                    counter[route] += 1
+        return dict(sorted(counter.items()))
+
+    def schema_query_fallback_count(self) -> int:
+        return sum(
+            bool(call.metadata.get("schema_query_fallback_used"))
+            for item in self.results
+            for call in item.agent_result.get_tool_calls("schema_retrieve")
+        )
+
     def recovery_yield(self) -> Dict[str, Any]:
         eligible = [
             item
@@ -516,6 +536,8 @@ class EvaluationReport(BaseModel):
             "average_tool_calls": self.average_tool_calls(),
             "p95_tool_calls": self.p95_tool_calls(),
             "tool_call_totals": self.tool_call_totals(),
+            "query_plan_route_totals": self.query_plan_route_totals(),
+            "schema_query_fallback_count": self.schema_query_fallback_count(),
             "p50_agent_execution_time_ms": self.p50_agent_execution_time(),
             "p95_agent_execution_time_ms": self.p95_agent_execution_time(),
             "max_agent_execution_time_ms": self.max_agent_execution_time(),
@@ -1385,6 +1407,10 @@ class ComparisonReport(BaseModel):
                 "p95_agent_execution_time_ms": report.p95_agent_execution_time(),
                 "average_tool_calls": report.average_tool_calls(),
                 "tool_call_totals": report.tool_call_totals(),
+                "query_plan_route_totals": report.query_plan_route_totals(),
+                "schema_query_fallback_count": (
+                    report.schema_query_fallback_count()
+                ),
                 "recovery_yield": report.recovery_yield(),
                 "false_block_rate": report.false_block_rate(),
                 "plan_acceptance_precision": report.plan_acceptance_precision(),
@@ -1480,7 +1506,7 @@ class ComparisonReport(BaseModel):
         issues = self.comparability_issues()
         summaries = self.strategy_summaries()
         lines = [
-            "# Text2SQL S0/S1/S2 对比报告",
+            "# Text2SQL 策略对比报告",
             "",
             f"- 生成时间：{self.timestamp.isoformat()}",
             f"- 是否可公平比较：{'是' if not issues else '否'}",

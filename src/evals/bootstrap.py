@@ -30,6 +30,7 @@ from QueryMind.core.evaluation import (
     EvaluationRuntime,
     parse_evaluation_mode,
 )
+from QueryMind.core.agent import QueryPlanMode
 from QueryMind.core.llm import LlmService
 from QueryMind.core.recovery import ExponentialBackoffStrategy
 from QueryMind.integrations.llmservice import AnthropicLlmService, OpenAILlmService
@@ -69,7 +70,7 @@ def resolve_agent_temperature() -> float:
 
 
 def resolve_evaluation_mode(value: str | None = None) -> EvaluationMode:
-    """Resolve the isolated S0/S1/S2 strategy from CLI or environment."""
+    """Resolve the isolated S0/S1/S2/S3 strategy from CLI or environment."""
     return parse_evaluation_mode(value or os.getenv("EVAL_MODE") or "s2")
 
 
@@ -354,7 +355,12 @@ def build_runtime_from_env(
         if isinstance(evaluation_mode, EvaluationMode)
         else evaluation_mode
     )
-    require_query_plan = resolved_mode == EvaluationMode.S2_AGENT_WITH_PLAN
+    query_plan_mode = QueryPlanMode.DISABLED
+    if resolved_mode == EvaluationMode.S2_AGENT_WITH_PLAN:
+        query_plan_mode = QueryPlanMode.ALWAYS
+    elif resolved_mode == EvaluationMode.S3_ADAPTIVE_AGENT:
+        query_plan_mode = QueryPlanMode.ADAPTIVE
+    require_query_plan = query_plan_mode != QueryPlanMode.DISABLED
     agent_temperature = resolve_agent_temperature()
     business_schemas = ["person", "humanresources", "production", "purchasing", "sales"]
 
@@ -444,6 +450,7 @@ def build_runtime_from_env(
     runtime.agent_config.max_metadata_query_retries = max_metadata_query_retries
     runtime.agent_config.max_query_plan_retries = max_query_plan_retries
     runtime.agent_config.require_query_plan = require_query_plan
+    runtime.agent_config.query_plan_mode = query_plan_mode
     runtime.agent_config.temperature = agent_temperature
     return runtime
 

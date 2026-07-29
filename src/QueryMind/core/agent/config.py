@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from .._compat import StrEnum
+from .query_plan import QueryPlanMode, parse_query_plan_mode
 
 if TYPE_CHECKING:
     from ..user import User
@@ -149,7 +150,13 @@ class AgentConfig(BaseModel):
     require_query_plan: bool = Field(
         default=False,
         description=(
-            "Require submit_query_plan evidence and SQL alignment before run_sql"
+            "Legacy compatibility flag: require a plan when query_plan_mode is unset"
+        ),
+    )
+    query_plan_mode: QueryPlanMode = Field(
+        default=QueryPlanMode.DISABLED,
+        description=(
+            "Query plan policy: disabled, always, or adaptive SQL-shape routing"
         ),
     )
     max_tokens: Optional[int] = Field(default=None, gt=0)
@@ -168,3 +175,15 @@ class AgentConfig(BaseModel):
         default="hybrid",
         description="Default search mode: hybrid, vector, graph, or expand"
     )
+
+    def effective_query_plan_mode(self) -> QueryPlanMode:
+        """Resolve the explicit mode with the legacy boolean as fallback."""
+        if (
+            self.query_plan_mode == QueryPlanMode.DISABLED
+            and self.require_query_plan
+        ):
+            return QueryPlanMode.ALWAYS
+        return parse_query_plan_mode(
+            self.query_plan_mode,
+            require_query_plan=self.require_query_plan,
+        )

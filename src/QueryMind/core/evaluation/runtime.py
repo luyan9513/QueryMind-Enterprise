@@ -15,6 +15,7 @@ from QueryMind.capabilities.sql_runner import SqlRunner
 from QueryMind.core.agent import (
     Agent,
     AgentConfig,
+    QueryPlanMode,
     build_schema_governance_stack,
     build_sql_governance_stack,
 )
@@ -293,6 +294,7 @@ class EvaluationRuntime:
         registry = RLSToolRegistry(
             config_path="rls_config.yaml",
             require_query_plan=self.agent_config.require_query_plan,
+            query_plan_mode=self.agent_config.effective_query_plan_mode(),
         )
         registry.register_local_tool(
             RunSqlTool(
@@ -304,7 +306,10 @@ class EvaluationRuntime:
             [],
         )
         registry.register_local_tool(SchemaRetrieveTool(schema_memory=self.schema_memory), [])
-        if self.agent_config.require_query_plan:
+        if (
+            self.agent_config.effective_query_plan_mode()
+            != QueryPlanMode.DISABLED
+        ):
             registry.register_local_tool(SubmitQueryPlanTool(), [])
         return registry
 

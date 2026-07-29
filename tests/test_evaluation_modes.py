@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from QueryMind.core.agent import AgentConfig  # noqa: E402
+from QueryMind.core.agent import AgentConfig, QueryPlanMode  # noqa: E402
 from QueryMind.core.evaluation import (  # noqa: E402
     EvaluationConversationStore,
     EvaluationMode,
@@ -85,8 +85,9 @@ def test_parse_evaluation_mode_accepts_stable_aliases() -> None:
         EvaluationMode.S1_AGENT_WITHOUT_PLAN
     )
     assert parse_evaluation_mode(None) == EvaluationMode.S2_AGENT_WITH_PLAN
+    assert parse_evaluation_mode("s3") == EvaluationMode.S3_ADAPTIVE_AGENT
 
-    with pytest.raises(ValueError, match="s0, s1, s2"):
+    with pytest.raises(ValueError, match="s0, s1, s2, s3"):
         parse_evaluation_mode("unknown")
 
 
@@ -146,7 +147,7 @@ def test_extract_single_shot_sql_supports_json_and_fenced_sql() -> None:
 
 
 @pytest.mark.asyncio
-async def test_query_plan_tool_is_only_registered_for_s2() -> None:
+async def test_query_plan_tool_is_registered_for_strict_and_adaptive_modes() -> None:
     llm = _SingleResponseLlm('{"sql":"SELECT 1"}')
     runtime = EvaluationRuntime(
         database_id="demo",
@@ -161,6 +162,9 @@ async def test_query_plan_tool_is_only_registered_for_s2() -> None:
     s1_tools = await runtime._build_tool_registry().list_tools()
     runtime.agent_config.require_query_plan = True
     s2_tools = await runtime._build_tool_registry().list_tools()
+    runtime.agent_config.query_plan_mode = QueryPlanMode.ADAPTIVE
+    s3_tools = await runtime._build_tool_registry().list_tools()
 
     assert "submit_query_plan" not in s1_tools
     assert "submit_query_plan" in s2_tools
+    assert "submit_query_plan" in s3_tools

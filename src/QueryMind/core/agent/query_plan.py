@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import re
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 from sqlglot import exp, parse_one
 
+from .._compat import StrEnum
 from .sql_governance_shape import analyze_sql_shape
-
 
 _IDENTIFIER_QUOTE_RE = re.compile(r"[`\"\[\]]")
 _COUNT_DISTINCT_RE = re.compile(
@@ -19,6 +19,43 @@ _COUNT_DISTINCT_RE = re.compile(
 _EXPLICIT_DISTINCT_REQUEST_RE = re.compile(
     r"(?i)(?:\bdistinct\b|\bunique\b|去重|唯一)"
 )
+
+
+class QueryPlanMode(StrEnum):
+    """How the runtime decides whether a query plan is mandatory."""
+
+    DISABLED = "disabled"
+    ALWAYS = "always"
+    ADAPTIVE = "adaptive"
+
+
+def parse_query_plan_mode(
+    value: str | QueryPlanMode | None,
+    *,
+    require_query_plan: bool = False,
+) -> QueryPlanMode:
+    """Resolve the new mode while preserving the legacy boolean switch."""
+    if isinstance(value, QueryPlanMode):
+        return value
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "": QueryPlanMode.ALWAYS if require_query_plan else QueryPlanMode.DISABLED,
+        "off": QueryPlanMode.DISABLED,
+        "false": QueryPlanMode.DISABLED,
+        "disabled": QueryPlanMode.DISABLED,
+        "on": QueryPlanMode.ALWAYS,
+        "true": QueryPlanMode.ALWAYS,
+        "required": QueryPlanMode.ALWAYS,
+        "always": QueryPlanMode.ALWAYS,
+        "adaptive": QueryPlanMode.ADAPTIVE,
+        "risk_based": QueryPlanMode.ADAPTIVE,
+    }
+    try:
+        return aliases[normalized]
+    except KeyError as exc:
+        raise ValueError(
+            "Query plan mode must be one of: disabled, always, adaptive"
+        ) from exc
 
 
 class QueryPlanFilter(BaseModel):
@@ -83,6 +120,16 @@ class QueryPlanCheck:
     @property
     def passed(self) -> bool:
         return not self.issues
+
+
+@dataclass(slots=True)
+class QueryPlanRiskAssessment:
+    """Deterministic SQL-shape decision used by adaptive plan routing."""
+
+    requires_plan: bool
+    risk_level: str
+    reasons: List[str] = field(default_factory=list)
+    evidence: Dict[str, Any] = field(default_factory=dict)
 
 
 def _identifier_parts(value: Any) -> tuple[str, ...]:
@@ -290,6 +337,74 @@ def _parse_sql_details(sql: str, dialect: Optional[str]) -> Dict[str, Any]:
         "columns": _dedupe(columns),
         "where_columns": _dedupe(where_columns),
     }
+
+
+def assess_query_plan_risk(
+    sql: str,
+    context_metadata: Dict[str, Any],
+    *,
+    dialect: Optional[str] = None,
+) -> QueryPlanRiskAssessment:
+    """Require plans for structurally risky SQL without dataset-specific rules.
+
+    The fast path is intentionally narrow: one evidence-backed physical table,
+    one SELECT statement, and no join, subquery, window, distinct, HAVING,
+    set operation, rollup, grouping sets, or detected time-series shape.
+    Simple filters and one-table grouped aggregations remain eligible.
+    """
+    shape = analyze_sql_shape(sql, dialect=dialect)
+    details = _parse_sql_details(sql, dialect)
+    actual_tables = details["tables"] or list(shape.table_references)
+    raw_evidence = context_metadata.get("schema_evidence")
+    schema_evidence = dict(raw_evidence) if isinstance(raw_evidence, dict) else {}
+    evidence_tables = list(schema_evidence.get("tables") or [])
+    reasons: List[str] = []
+
+    if shape.statement_count != 1 or not shape.has_select or not shape.has_from:
+        reasons.append("unsupported_statement_shape")
+    if not evidence_tables:
+        reasons.append("schema_evidence_missing")
+    for table in actual_tables:
+        if not any(_identifier_matches(table, item) for item in evidence_tables):
+            reasons.append(f"table_not_in_schema_evidence:{table}")
+    if len(actual_tables) != 1:
+        reasons.append(f"physical_table_count:{len(actual_tables)}")
+    if shape.has_join:
+        reasons.append("join")
+    if shape.has_outer_join:
+        reasons.append("outer_join")
+    if shape.has_cross_join:
+        reasons.append("cross_join")
+    if shape.has_subquery or shape.cte_count:
+        reasons.append("subquery_or_cte")
+    if shape.has_window_function or shape.has_over:
+        reasons.append("window")
+    if shape.has_distinct or re.search(
+        r"(?i)\bcount\s*\(\s*distinct\b",
+        sql,
+    ):
+        reasons.append("distinct")
+    if shape.has_having:
+        reasons.append("having")
+    if shape.has_set_operation:
+        reasons.append("set_operation")
+    if shape.has_rollup or shape.has_grouping_sets or shape.has_grouping:
+        reasons.append("advanced_grouping")
+    if shape.has_time_series:
+        reasons.append("time_series")
+
+    deduped_reasons = _dedupe(reasons)
+    requires_plan = bool(deduped_reasons)
+    return QueryPlanRiskAssessment(
+        requires_plan=requires_plan,
+        risk_level="high" if requires_plan else "low",
+        reasons=deduped_reasons,
+        evidence={
+            "physical_table_count": len(actual_tables),
+            "evidence_table_count": len(evidence_tables),
+            "feature_names": list(shape.feature_names),
+        },
+    )
 
 
 def validate_sql_against_query_plan(

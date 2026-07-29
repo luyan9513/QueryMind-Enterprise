@@ -29,6 +29,9 @@ from QueryMind.core.agent.sql_governance import (
 )
 from QueryMind.core.agent.query_plan import (
     QueryPlan,
+    QueryPlanMode,
+    assess_query_plan_risk,
+    parse_query_plan_mode,
     validate_sql_against_query_plan,
 )
 from QueryMind.core.tool import Tool, ToolContext, ToolRejection
@@ -53,6 +56,7 @@ class RLSToolRegistry(ToolRegistry):
         audit_logger=None,
         audit_config=None,
         require_query_plan: bool = False,
+        query_plan_mode: str | QueryPlanMode | None = None,
     ):
         """Initialize RLS Registry.
         
@@ -60,12 +64,17 @@ class RLSToolRegistry(ToolRegistry):
             config_path: Path to rls_config.yaml
             audit_logger: Optional audit logger
             audit_config: Optional audit config
-            require_query_plan: Require an accepted schema-grounded plan before run_sql
+            require_query_plan: Legacy switch requiring a plan before run_sql
+            query_plan_mode: disabled, always, or adaptive SQL-shape routing
         """
         super().__init__(audit_logger=audit_logger, audit_config=audit_config)
         self._load_config(config_path)
         self._sql_governance_policy = SqlGovernancePolicy.from_env()
-        self.require_query_plan = require_query_plan
+        self.query_plan_mode = parse_query_plan_mode(
+            query_plan_mode,
+            require_query_plan=require_query_plan,
+        )
+        self.require_query_plan = self.query_plan_mode != QueryPlanMode.DISABLED
     
     def _load_config(self, config_path: str) -> None:
         """Load RLS configuration from YAML file."""
@@ -423,10 +432,39 @@ class RLSToolRegistry(ToolRegistry):
             )
 
         # 3. Runtime Query Plan Alignment
-        if self.require_query_plan:
+        if self.query_plan_mode != QueryPlanMode.DISABLED:
             raw_plan = context.metadata.get("query_plan")
             plan_status = str(context.metadata.get("query_plan_status") or "")
-            if not isinstance(raw_plan, dict) or plan_status != "accepted":
+            has_accepted_plan = isinstance(raw_plan, dict) and plan_status == "accepted"
+            if (
+                not has_accepted_plan
+                and self.query_plan_mode == QueryPlanMode.ADAPTIVE
+            ):
+                risk = assess_query_plan_risk(
+                    original_sql,
+                    context.metadata,
+                    dialect=str(context.metadata.get("dialect") or "").strip() or None,
+                )
+                routing = {
+                    "mode": self.query_plan_mode.value,
+                    "route": "plan" if risk.requires_plan else "fast",
+                    "risk_level": risk.risk_level,
+                    "reasons": list(risk.reasons),
+                    "evidence": dict(risk.evidence),
+                }
+                context.metadata["query_plan_routing"] = routing
+                if risk.requires_plan:
+                    reason_text = ", ".join(risk.reasons[:8])
+                    return ToolRejection(
+                        reason=(
+                            "SQL rejected: adaptive routing classified this SQL as "
+                            f"high risk ({reason_text}). Submit a schema-grounded "
+                            "query plan before retrying run_sql."
+                        ),
+                        stage="planning",
+                        code="adaptive_query_plan_required",
+                    )
+            elif not has_accepted_plan:
                 return ToolRejection(
                     reason=(
                         "SQL rejected: submit a schema-grounded query plan with "
@@ -435,30 +473,41 @@ class RLSToolRegistry(ToolRegistry):
                     stage="planning",
                     code="query_plan_required",
                 )
-            try:
-                query_plan = QueryPlan.model_validate(raw_plan)
-            except Exception:
-                return ToolRejection(
-                    reason="SQL rejected: the accepted query plan is invalid; submit it again.",
-                    stage="planning",
-                    code="query_plan_invalid",
-                )
+            if has_accepted_plan:
+                context.metadata["query_plan_routing"] = {
+                    "mode": self.query_plan_mode.value,
+                    "route": "plan",
+                    "risk_level": "planned",
+                    "reasons": [],
+                    "evidence": {},
+                }
+                try:
+                    query_plan = QueryPlan.model_validate(raw_plan)
+                except Exception:
+                    return ToolRejection(
+                        reason=(
+                            "SQL rejected: the accepted query plan is invalid; "
+                            "submit it again."
+                        ),
+                        stage="planning",
+                        code="query_plan_invalid",
+                    )
 
-            plan_check = validate_sql_against_query_plan(
-                query_plan,
-                original_sql,
-                dialect=str(context.metadata.get("dialect") or "").strip() or None,
-            )
-            if not plan_check.passed:
-                issue_text = "; ".join(plan_check.issues[:8])
-                return ToolRejection(
-                    reason=(
-                        "SQL rejected: it does not match the accepted query plan. "
-                        f"Repair the SQL or submit a corrected plan: {issue_text}"
-                    ),
-                    stage="planning",
-                    code="query_plan_sql_mismatch",
+                plan_check = validate_sql_against_query_plan(
+                    query_plan,
+                    original_sql,
+                    dialect=str(context.metadata.get("dialect") or "").strip() or None,
                 )
+                if not plan_check.passed:
+                    issue_text = "; ".join(plan_check.issues[:8])
+                    return ToolRejection(
+                        reason=(
+                            "SQL rejected: it does not match the accepted query plan. "
+                            f"Repair the SQL or submit a corrected plan: {issue_text}"
+                        ),
+                        stage="planning",
+                        code="query_plan_sql_mismatch",
+                    )
 
         # 4. SQL Semantics Validation
         semantics_reason = sql_semantics_rejection_reason(
@@ -540,6 +589,7 @@ def create_rls_registry(
     config_path: str = "rls_config.yaml",
     audit_logger=None,
     require_query_plan: bool = False,
+    query_plan_mode: str | QueryPlanMode | None = None,
 ) -> RLSToolRegistry:
     """Create an RLS-enabled ToolRegistry.
     
@@ -554,4 +604,5 @@ def create_rls_registry(
         config_path=config_path,
         audit_logger=audit_logger,
         require_query_plan=require_query_plan,
+        query_plan_mode=query_plan_mode,
     )

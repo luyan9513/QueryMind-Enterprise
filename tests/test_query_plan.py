@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -10,19 +10,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from QueryMind.capabilities.sql_runner.models import RunSqlToolArgs  # noqa: E402
 from QueryMind.core.agent.agent import (  # noqa: E402
     _append_query_plan_recovery_prompt,
+    _backfill_schema_retrieve_query,
     _is_query_plan_rejection,
     _query_plan_recovery_tools,
 )
 from QueryMind.core.agent.query_plan import (  # noqa: E402
     QueryPlan,
     QueryPlanFilter,
+    QueryPlanMode,
+    assess_query_plan_risk,
     build_schema_evidence,
+    parse_query_plan_mode,
     validate_query_plan_evidence,
     validate_query_plan_intent,
     validate_sql_against_query_plan,
 )
 from QueryMind.core.evaluation.runtime import NoOpAgentMemory  # noqa: E402
-from QueryMind.core.tool import ToolContext, ToolRejection, ToolSchema  # noqa: E402
+from QueryMind.core.tool import (  # noqa: E402
+    ToolCall,
+    ToolContext,
+    ToolRejection,
+    ToolSchema,
+)
 from QueryMind.core.tool.models import ToolResult  # noqa: E402
 from QueryMind.core.user import User  # noqa: E402
 from QueryMind.rls_registry import RLSToolRegistry  # noqa: E402
@@ -123,6 +132,96 @@ def test_schema_evidence_merges_tables_and_columns_across_retrievals() -> None:
     assert second["tables"] == ["sales.orders", "sales.customers"]
     assert second["table_columns"]["sales.orders"] == ["orderid", "customerid"]
     assert second["retrieval_count"] == 2
+
+
+def test_query_plan_mode_preserves_legacy_switch_and_adaptive_alias() -> None:
+    assert parse_query_plan_mode(None) == QueryPlanMode.DISABLED
+    assert (
+        parse_query_plan_mode(None, require_query_plan=True)
+        == QueryPlanMode.ALWAYS
+    )
+    assert parse_query_plan_mode("risk-based") == QueryPlanMode.ADAPTIVE
+
+
+def test_adaptive_risk_allows_narrow_one_table_sql() -> None:
+    metadata = {
+        "schema_evidence": {
+            "tables": ["warehouse.sales.orders"],
+        }
+    }
+    simple = assess_query_plan_risk(
+        """
+        SELECT status, COUNT(*) AS order_count
+        FROM sales.orders
+        WHERE created_at >= DATE '2026-01-01'
+        GROUP BY status
+        ORDER BY order_count DESC
+        """,
+        metadata,
+        dialect="postgres",
+    )
+
+    assert simple.requires_plan is False
+    assert simple.risk_level == "low"
+
+
+def test_adaptive_risk_requires_plan_for_generic_complex_shapes() -> None:
+    metadata = {
+        "schema_evidence": {
+            "tables": ["warehouse.sales.orders", "warehouse.sales.customers"],
+        }
+    }
+    complex_query = assess_query_plan_risk(
+        """
+        SELECT c.segment, COUNT(DISTINCT o.order_id) AS order_count
+        FROM sales.orders AS o
+        JOIN sales.customers AS c ON c.customer_id = o.customer_id
+        GROUP BY c.segment
+        HAVING COUNT(DISTINCT o.order_id) > 5
+        """,
+        metadata,
+        dialect="postgres",
+    )
+
+    assert complex_query.requires_plan is True
+    assert {"join", "distinct", "having"} <= set(complex_query.reasons)
+
+
+def test_adaptive_risk_detects_time_series_functions_case_insensitively() -> None:
+    metadata = {
+        "schema_evidence": {
+            "tables": ["warehouse.sales.orders"],
+        }
+    }
+
+    monthly = assess_query_plan_risk(
+        """
+        SELECT DATE_TRUNC('month', order_date), SUM(total)
+        FROM sales.orders
+        GROUP BY DATE_TRUNC('month', order_date)
+        """,
+        metadata,
+        dialect="postgres",
+    )
+
+    assert monthly.requires_plan is True
+    assert "time_series" in monthly.reasons
+
+
+def test_empty_schema_query_is_backfilled_from_user_question() -> None:
+    tool_call = ToolCall(
+        id="schema-1",
+        name="schema_retrieve",
+        arguments={"query": "", "table_names": []},
+    )
+
+    changed = _backfill_schema_retrieve_query(
+        tool_call,
+        "按区域统计订单金额",
+    )
+
+    assert changed is True
+    assert tool_call.arguments["query"] == "按区域统计订单金额"
 
 
 def test_query_plan_requires_retrieved_qualified_evidence() -> None:
@@ -274,6 +373,44 @@ def test_rls_registry_requires_and_enforces_accepted_query_plan() -> None:
     )
 
     assert isinstance(accepted, RunSqlToolArgs)
+
+
+def test_adaptive_registry_bypasses_only_low_risk_sql() -> None:
+    registry = RLSToolRegistry(query_plan_mode=QueryPlanMode.ADAPTIVE)
+    tool = SimpleNamespace(name="run_sql")
+    context = _context(
+        {
+            "dialect": "postgres",
+            "schema_evidence": {
+                "tables": ["warehouse.production.product"],
+            },
+        }
+    )
+    low_risk = RunSqlToolArgs(
+        sql="SELECT color, COUNT(*) FROM production.product GROUP BY color"
+    )
+    high_risk = RunSqlToolArgs(
+        sql=(
+            "SELECT p.name, SUM(d.quantity) "
+            "FROM production.product AS p "
+            "JOIN sales.detail AS d ON d.product_id = p.product_id "
+            "GROUP BY p.name"
+        )
+    )
+
+    allowed = asyncio.run(
+        registry.transform_args(tool, low_risk, context.user, context)
+    )
+    allowed_route = context.metadata["query_plan_routing"]["route"]
+    rejected = asyncio.run(
+        registry.transform_args(tool, high_risk, context.user, context)
+    )
+
+    assert isinstance(allowed, RunSqlToolArgs)
+    assert allowed_route == "fast"
+    assert context.metadata["query_plan_routing"]["route"] == "plan"
+    assert isinstance(rejected, ToolRejection)
+    assert rejected.code == "adaptive_query_plan_required"
 
 
 def test_query_plan_recovery_limits_visible_tools_and_can_exhaust() -> None:

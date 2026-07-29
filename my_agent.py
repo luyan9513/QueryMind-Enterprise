@@ -21,17 +21,22 @@ MAX_TOOL_ITERATIONS = int(os.getenv("MAX_TOOL_ITERATIONS", "25"))
 AGENT_TEMPERATURE = float(os.getenv("AGENT_TEMPERATURE", "0.0"))
 MAX_METADATA_QUERY_RETRIES = int(os.getenv("MAX_METADATA_QUERY_RETRIES", "2"))
 MAX_QUERY_PLAN_RETRIES = int(os.getenv("MAX_QUERY_PLAN_RETRIES", "3"))
-REQUIRE_QUERY_PLAN = os.getenv("REQUIRE_QUERY_PLAN", "true").strip().lower() in {
+LEGACY_REQUIRE_QUERY_PLAN = os.getenv(
+    "REQUIRE_QUERY_PLAN", "true"
+).strip().lower() in {
     "1",
     "true",
     "yes",
     "on",
 }
+QUERY_PLAN_MODE_VALUE = os.getenv("QUERY_PLAN_MODE")
 
 from QueryMind.core import Agent, AgentConfig, ToolRegistry  # noqa: E402
 from QueryMind.core.agent import (  # noqa: E402
+    QueryPlanMode,
     build_schema_governance_stack,
     build_sql_governance_stack,
+    parse_query_plan_mode,
 )
 from QueryMind.core.enhancer import (  # noqa: E402
     CompositeLlmContextEnhancer,
@@ -85,6 +90,12 @@ from QueryMind.tools import (  # noqa: E402
     VisualizeDataTool,
     WriteFileTool,
 )
+
+QUERY_PLAN_MODE = parse_query_plan_mode(
+    QUERY_PLAN_MODE_VALUE,
+    require_query_plan=LEGACY_REQUIRE_QUERY_PLAN,
+)
+REQUIRE_QUERY_PLAN = QUERY_PLAN_MODE != QueryPlanMode.DISABLED
 from QueryMind.rls_registry import RLSToolRegistry  # noqa: E402
 
 
@@ -128,7 +139,12 @@ class SimpleUserResolver(UserResolver):
         )
 
 
-def register_tools(registry: ToolRegistry, schema_memory: Neo4jMem0SchemaMemory) -> None:
+def register_tools(
+    registry: ToolRegistry,
+    schema_memory: Neo4jMem0SchemaMemory,
+    *,
+    query_plan_mode: QueryPlanMode,
+) -> None:
     results_file_system = LocalFileSystem(working_directory=str(QUERY_RESULTS_DIR))
 
     core_tools = [
@@ -146,8 +162,9 @@ def register_tools(registry: ToolRegistry, schema_memory: Neo4jMem0SchemaMemory)
             ["user", "admin"],
         ),
         (SchemaRetrieveTool(schema_memory=schema_memory), ["user", "admin"]),
-        (SubmitQueryPlanTool(), ["user", "admin"]),
     ]
+    if query_plan_mode != QueryPlanMode.DISABLED:
+        core_tools.append((SubmitQueryPlanTool(), ["user", "admin"]))
     memory_tools = [
         (SaveQuestionToolArgsTool(), ["user", "admin"]),
         (SearchSavedCorrectToolUsesTool(), ["user", "admin"]),
@@ -254,8 +271,13 @@ def build_agent() -> Agent:
             schema_name="public",
         ),
         require_query_plan=REQUIRE_QUERY_PLAN,
+        query_plan_mode=QUERY_PLAN_MODE,
     )
-    register_tools(registry, schema_memory)
+    register_tools(
+        registry,
+        schema_memory,
+        query_plan_mode=QUERY_PLAN_MODE,
+    )
 
     agent_config = AgentConfig(
         max_tool_iterations=MAX_TOOL_ITERATIONS,
@@ -263,6 +285,7 @@ def build_agent() -> Agent:
         max_metadata_query_retries=MAX_METADATA_QUERY_RETRIES,
         max_query_plan_retries=MAX_QUERY_PLAN_RETRIES,
         require_query_plan=REQUIRE_QUERY_PLAN,
+        query_plan_mode=QUERY_PLAN_MODE,
         schema_search_default_threshold=0.4,
     )
 

@@ -781,6 +781,7 @@ def analyze_sql_shape(
             re.search(
                 r"\b(date_trunc|date_part|extract|current_date|current_timestamp|interval|year\s*\(|month\s*\(|quarter\s*\(|week\s*\(|day\s*\(|timestamp|time series|time-series|over time|by date|by day|by week|by month|by quarter|by year)\b",
                 upper,
+                flags=re.IGNORECASE,
             )
         )
         table_references = _dedupe_preserve_order(

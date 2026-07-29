@@ -1,4 +1,4 @@
-"""Build a fairness-checked comparison from S0/S1/S2 evaluation reports."""
+"""Build a fairness-checked comparison from S0/S1/S2/S3 reports."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 
 from QueryMind.core.evaluation import ComparisonReport, EvaluationReport
-
 
 _REDACTED_LIST_FIELDS = {
     "preview_rows",
@@ -65,28 +64,36 @@ def merge_reports(label: str, values: list[str]) -> EvaluationReport:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Compare QueryMind S0/S1/S2 runs")
+    parser = argparse.ArgumentParser(
+        description="Compare QueryMind S0/S1/S2 and optional S3 runs"
+    )
     parser.add_argument("--s0-report", action="append", required=True)
     parser.add_argument("--s1-report", action="append", required=True)
     parser.add_argument("--s2-report", action="append", required=True)
+    parser.add_argument("--s3-report", action="append")
     parser.add_argument("--output-dir", required=True)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    report_groups = {
+        "s0": args.s0_report,
+        "s1": args.s1_report,
+        "s2": args.s2_report,
+    }
+    if args.s3_report:
+        report_groups["s3"] = args.s3_report
     repeat_counts = {
-        len(args.s0_report),
-        len(args.s1_report),
-        len(args.s2_report),
+        len(values)
+        for values in report_groups.values()
     }
     if len(repeat_counts) != 1:
-        raise SystemExit("S0, S1, and S2 must provide the same number of reports")
+        raise SystemExit("Every supplied strategy must provide the same report count")
     comparison = ComparisonReport(
         reports={
-            "s0": merge_reports("s0", args.s0_report),
-            "s1": merge_reports("s1", args.s1_report),
-            "s2": merge_reports("s2", args.s2_report),
+            label: merge_reports(label, values)
+            for label, values in report_groups.items()
         }
     )
     output_dir = Path(args.output_dir).expanduser()

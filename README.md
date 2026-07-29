@@ -278,7 +278,15 @@ The first controlled real-model round is complete: 24 frozen questions per mode,
 
 This is evidence of an observed gain on one AdventureWorks run, not a general accuracy guarantee. S2 is not ready to become the unconditional default: 41.67% of cases still executed an incorrect answer, its P95 latency exceeded 53 seconds, and only one run per mode has been completed. The generated detailed reports retain every question, reference SQL, Agent SQL, failure location, cause, and recommendation while omitting result rows and judge raw text.
 
-The latest formal Python test scope is `167 passed, 1 warning`.
+### v0.5 Adaptive Query Plan Routing
+
+The v0.5 work adds a database-agnostic `disabled / always / adaptive` Query Plan mode. In adaptive mode, evidence-backed single-table SQL without joins, subqueries, windows, distinct operations, time-series bucketing, or other high-risk shapes may use a fast path. Complex SQL still requires the v0.3 Query Plan, and both routes continue through the upstream SQL Governance and RLS checks.
+
+Two complete S3 runs on the same frozen 24-case benchmark both reached 54.17% strict and 62.50% business accuracy, with 25.00% wrong-but-executed and 87.50% automatic-answer coverage. Their P95 latency was 38.16 and 43.78 seconds, versus 53.13 seconds for the previous S2 run. Per-case business correctness matched on 20/24 cases, so the repeated aggregate rate is not evidence of deterministic per-question stability.
+
+The normal chat default remains `QUERY_PLAN_MODE=always`. Adaptive routing is opt-in until a second data source and its own admission benchmark pass. See [the v0.5 implementation record](docs/portfolio/v0.5-adaptive-query-plan-routing.md).
+
+The latest formal Python test scope is `173 passed, 1 warning`.
 
 ### Web Component
 
@@ -303,14 +311,14 @@ The handbook expands the README into components, advanced-features, use-case, an
 
 ### Ongoing
 
-1. Use the completed S0/S1/S2 result to design a risk-based fast/slow route, reduce Query Plan false blocks, and rerun each mode three times before making the Agent the default path. See [the v0.4 validation plan](docs/portfolio/v0.4-accuracy-performance-validation-plan.md) and [the implementation record](docs/portfolio/v0.4-evaluation-harness-implementation.md).
+1. Use the completed S3 adaptive-routing runs to add business-semantic contract checks for metric definition, ordering, aliases, and output grain. Keep the fast path generic and do not add benchmark table names or answer-specific rules. See [the v0.5 implementation record](docs/portfolio/v0.5-adaptive-query-plan-routing.md).
 
 <figure>
   <img src="docs/figures/use-cases/eval-driven%20iterations.png" alt="Eval-driven iterations" />
   <figcaption>Eval-driven iterations: use benchmark feedback to refine prompts, governance, and SQL recovery behavior.</figcaption>
 </figure>
 
-2. Establish a second data source with its own [accuracy admission contract](docs/portfolio/data-source-accuracy-contract-template.md), semantic definitions, frozen benchmark, and confidence/abstention metrics before making any cross-database accuracy claim.
+2. Establish a second data source with its own [accuracy admission contract](docs/portfolio/data-source-accuracy-contract-template.md), semantic definitions, frozen benchmark, and confidence/abstention metrics before making adaptive routing the default or making any cross-database accuracy claim.
 
 
 ### Future Actions

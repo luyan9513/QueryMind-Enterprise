@@ -47,7 +47,7 @@ from QueryMind.capabilities.agent_memory import AgentMemory
 from QueryMind.capabilities.schema_memory import SchemaMemory
 from QueryMind.capabilities.schema_management import SchemaManagementService
 from .conversation_title import ensure_conversation_title
-from .query_plan import build_schema_evidence
+from .query_plan import QueryPlanMode, build_schema_evidence
 
 import logging
 
@@ -100,6 +100,17 @@ not call tools again in this turn. Explain the missing schema evidence or
 business definition and ask one concise clarification question instead of
 guessing.
 """.strip()
+_ADAPTIVE_QUERY_PLAN_PROMPT = """
+## Adaptive Query Plan Routing
+
+This runtime notice overrides the general reminder that every SQL needs a
+submitted plan. After schema retrieval, a simple one-table SELECT may call
+`run_sql` directly. A plan is mandatory before SQL with multiple tables,
+JOINs, subqueries or CTEs, windows, DISTINCT, HAVING, set operations, advanced
+grouping, or time-series structure. The runtime makes the final risk decision;
+if it rejects an unplanned SQL, submit a schema-grounded plan and retry. Do not
+submit a plan for a clearly low-risk one-table query merely out of habit.
+""".strip()
 
 
 def _normalize_sql_text(sql: str) -> str:
@@ -129,6 +140,26 @@ def _is_query_plan_rejection(result: ToolResult) -> bool:
 def _query_plan_recovery_tools(tool_schemas: List[ToolSchema]) -> List[ToolSchema]:
     allowed = {"schema_retrieve", "submit_query_plan"}
     return [tool for tool in tool_schemas if tool.name in allowed]
+
+
+def _backfill_schema_retrieve_query(
+    tool_call: ToolCall,
+    raw_user_message: str,
+) -> bool:
+    """Repair the model's empty semantic lookup with the current question."""
+    if tool_call.name != "schema_retrieve":
+        return False
+    table_names = tool_call.arguments.get("table_names")
+    if isinstance(table_names, list) and any(str(item).strip() for item in table_names):
+        return False
+    query = tool_call.arguments.get("query")
+    if isinstance(query, str) and query.strip():
+        return False
+    fallback = str(raw_user_message or "").strip()
+    if not fallback:
+        return False
+    tool_call.arguments["query"] = fallback
+    return True
 
 
 def _append_metadata_recovery_prompt(
@@ -1172,6 +1203,10 @@ class Agent:
                 # Collect all tool results first
                 tool_results = []
                 for i, tool_call in enumerate(response.tool_calls or []):
+                    schema_query_fallback_used = _backfill_schema_retrieve_query(
+                        tool_call,
+                        message,
+                    )
                     # Add task for this tool execution
                     tool_task = Task(
                         title=f"Execute {tool_call.name}",
@@ -1295,6 +1330,19 @@ class Agent:
                         )
 
                     result = await self.tool_registry.execute(tool_call, context)
+                    if schema_query_fallback_used:
+                        result.metadata["schema_query_fallback_used"] = True
+                        result.metadata["schema_query_fallback_source"] = (
+                            "raw_user_message"
+                        )
+                    if tool_call.name == "run_sql":
+                        query_plan_routing = context.metadata.get(
+                            "query_plan_routing"
+                        )
+                        if isinstance(query_plan_routing, dict):
+                            result.metadata["query_plan_routing"] = dict(
+                                query_plan_routing
+                            )
 
                     if _is_rejected_metadata_sql(tool_call, result):
                         metadata_query_rejections += 1
@@ -1745,6 +1793,17 @@ You can:
         system_prompt = await self.system_prompt_builder.build_system_prompt(
             user, visible_tool_schemas
         )
+        query_plan_mode = self.config.effective_query_plan_mode()
+        merged_metadata["query_plan_mode"] = query_plan_mode.value
+        if (
+            query_plan_mode == QueryPlanMode.ADAPTIVE
+            and any(tool.name == "submit_query_plan" for tool in visible_tool_schemas)
+        ):
+            system_prompt = "\n\n".join(
+                part
+                for part in [system_prompt or "", _ADAPTIVE_QUERY_PLAN_PROMPT]
+                if part
+            )
 
         if self.llm_context_enhancer and system_prompt is not None:
             enhancement_span = None
