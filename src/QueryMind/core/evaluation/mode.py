@@ -16,6 +16,7 @@ class EvaluationMode(StrEnum):
     S1_AGENT_WITHOUT_PLAN = "s1_agent_without_plan"
     S2_AGENT_WITH_PLAN = "s2_agent_with_plan"
     S3_ADAPTIVE_AGENT = "s3_adaptive_agent"
+    S4_REVIEWED_AGENT = "s4_reviewed_agent"
 
     @property
     def short_name(self) -> str:
@@ -35,6 +36,9 @@ _MODE_ALIASES = {
     "s3": EvaluationMode.S3_ADAPTIVE_AGENT,
     "adaptive_agent": EvaluationMode.S3_ADAPTIVE_AGENT,
     "s3_adaptive_agent": EvaluationMode.S3_ADAPTIVE_AGENT,
+    "s4": EvaluationMode.S4_REVIEWED_AGENT,
+    "reviewed_agent": EvaluationMode.S4_REVIEWED_AGENT,
+    "s4_reviewed_agent": EvaluationMode.S4_REVIEWED_AGENT,
 }
 
 
@@ -46,7 +50,7 @@ def parse_evaluation_mode(value: str | EvaluationMode | None) -> EvaluationMode:
     try:
         return _MODE_ALIASES[normalized]
     except KeyError as exc:
-        allowed = "s0, s1, s2, s3"
+        allowed = "s0, s1, s2, s3, s4"
         raise ValueError(f"Evaluation mode must be one of: {allowed}") from exc
 
 

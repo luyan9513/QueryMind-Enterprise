@@ -32,6 +32,7 @@ class SubmitQueryPlanTool(Tool[QueryPlan]):
         return QueryPlan
 
     async def execute(self, context: ToolContext, args: QueryPlan) -> ToolResult:
+        context.metadata.pop("sql_intent_review", None)
         check = validate_query_plan_evidence(args, context.metadata)
         intent_check = validate_query_plan_intent(
             args,

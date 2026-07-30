@@ -283,6 +283,30 @@ class EvaluationReport(BaseModel):
             for call in item.agent_result.get_tool_calls("schema_retrieve")
         )
 
+    def sql_review_decision_totals(self) -> Dict[str, int]:
+        counter: Counter[str] = Counter()
+        for item in self.results:
+            for call in item.agent_result.get_tool_calls("review_sql_intent"):
+                review = call.metadata.get("sql_intent_review")
+                if not isinstance(review, dict):
+                    continue
+                decision = str(review.get("decision") or "").strip()
+                if decision:
+                    counter[decision] += 1
+        return dict(sorted(counter.items()))
+
+    def failure_recovery_action_totals(self) -> Dict[str, int]:
+        counter: Counter[str] = Counter()
+        for item in self.results:
+            for call in item.agent_result.tool_calls:
+                recovery = call.metadata.get("failure_recovery")
+                if not isinstance(recovery, dict):
+                    continue
+                action = str(recovery.get("action") or "").strip()
+                if action:
+                    counter[action] += 1
+        return dict(sorted(counter.items()))
+
     def recovery_yield(self) -> Dict[str, Any]:
         eligible = [
             item
@@ -538,6 +562,10 @@ class EvaluationReport(BaseModel):
             "tool_call_totals": self.tool_call_totals(),
             "query_plan_route_totals": self.query_plan_route_totals(),
             "schema_query_fallback_count": self.schema_query_fallback_count(),
+            "sql_review_decision_totals": self.sql_review_decision_totals(),
+            "failure_recovery_action_totals": (
+                self.failure_recovery_action_totals()
+            ),
             "p50_agent_execution_time_ms": self.p50_agent_execution_time(),
             "p95_agent_execution_time_ms": self.p95_agent_execution_time(),
             "max_agent_execution_time_ms": self.max_agent_execution_time(),
@@ -1410,6 +1438,10 @@ class ComparisonReport(BaseModel):
                 "query_plan_route_totals": report.query_plan_route_totals(),
                 "schema_query_fallback_count": (
                     report.schema_query_fallback_count()
+                ),
+                "sql_review_decision_totals": report.sql_review_decision_totals(),
+                "failure_recovery_action_totals": (
+                    report.failure_recovery_action_totals()
                 ),
                 "recovery_yield": report.recovery_yield(),
                 "false_block_rate": report.false_block_rate(),

@@ -367,6 +367,7 @@ def enrich_result_metrics(result: EvaluationResult) -> None:
     run_sql_calls = result.agent_result.get_tool_calls("run_sql")
     schema_calls = result.agent_result.get_tool_calls("schema_retrieve")
     plan_calls = result.agent_result.get_tool_calls("submit_query_plan")
+    review_calls = result.agent_result.get_tool_calls("review_sql_intent")
     result.metadata.update(schema_metrics)
     result.metadata.update(
         {
@@ -375,6 +376,13 @@ def enrich_result_metrics(result: EvaluationResult) -> None:
             "query_plan_calls": len(plan_calls),
             "accepted_query_plan": any(bool(call.success) for call in plan_calls),
             "run_sql_calls": len(run_sql_calls),
+            "sql_review_calls": len(review_calls),
+            "approved_sql_review": any(
+                bool(
+                    (call.metadata.get("sql_intent_review") or {}).get("approved")
+                )
+                for call in review_calls
+            ),
         }
     )
     result.metadata["first_sql_execution_success"] = (

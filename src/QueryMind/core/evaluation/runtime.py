@@ -16,6 +16,7 @@ from QueryMind.core.agent import (
     Agent,
     AgentConfig,
     QueryPlanMode,
+    SqlReviewMode,
     build_schema_governance_stack,
     build_sql_governance_stack,
 )
@@ -28,7 +29,12 @@ from QueryMind.core.llm import LlmService
 from QueryMind.core.registry import ToolRegistry
 from QueryMind.core.storage import Conversation, ConversationStore, Message
 from QueryMind.core.user import RequestContext, User, UserResolver
-from QueryMind.tools import RunSqlTool, SchemaRetrieveTool, SubmitQueryPlanTool
+from QueryMind.tools import (
+    ReviewSqlIntentTool,
+    RunSqlTool,
+    SchemaRetrieveTool,
+    SubmitQueryPlanTool,
+)
 from QueryMind.rls_registry import RLSToolRegistry
 
 from .base import SqlTestCase
@@ -295,6 +301,7 @@ class EvaluationRuntime:
             config_path="rls_config.yaml",
             require_query_plan=self.agent_config.require_query_plan,
             query_plan_mode=self.agent_config.effective_query_plan_mode(),
+            sql_review_mode=self.agent_config.effective_sql_review_mode(),
         )
         registry.register_local_tool(
             RunSqlTool(
@@ -311,6 +318,11 @@ class EvaluationRuntime:
             != QueryPlanMode.DISABLED
         ):
             registry.register_local_tool(SubmitQueryPlanTool(), [])
+        if self.agent_config.effective_sql_review_mode() != SqlReviewMode.DISABLED:
+            registry.register_local_tool(
+                ReviewSqlIntentTool(llm_service=self.agent_llm_service),
+                [],
+            )
         return registry
 
     def _build_llm_context_enhancer(

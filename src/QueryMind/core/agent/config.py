@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from .._compat import StrEnum
 from .query_plan import QueryPlanMode, parse_query_plan_mode
+from .sql_review import SqlReviewMode, parse_sql_review_mode
 
 if TYPE_CHECKING:
     from ..user import User
@@ -159,6 +160,20 @@ class AgentConfig(BaseModel):
             "Query plan policy: disabled, always, or adaptive SQL-shape routing"
         ),
     )
+    structured_failure_recovery: bool = Field(
+        default=False,
+        description="Enable classified, bounded tool-failure recovery",
+    )
+    max_same_failure_retries: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        description="Matching failure fingerprints allowed before tools stop",
+    )
+    sql_review_mode: SqlReviewMode = Field(
+        default=SqlReviewMode.DISABLED,
+        description="Independent SQL semantic review: disabled, high_risk, or always",
+    )
     max_tokens: Optional[int] = Field(default=None, gt=0)
     ui_features: UiFeatures = Field(default_factory=UiFeatures)
     audit_config: AuditConfig = Field(default_factory=AuditConfig)
@@ -187,3 +202,6 @@ class AgentConfig(BaseModel):
             self.query_plan_mode,
             require_query_plan=self.require_query_plan,
         )
+
+    def effective_sql_review_mode(self) -> SqlReviewMode:
+        return parse_sql_review_mode(self.sql_review_mode)

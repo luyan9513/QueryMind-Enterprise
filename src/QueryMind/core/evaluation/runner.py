@@ -275,8 +275,19 @@ class EvaluationRunner:
             if message.tool_calls:
                 for tool_call in message.tool_calls:
                     tool_message = tool_results.get(tool_call.id)
-                    tool_metadata = sanitize_trace_metadata(
+                    raw_tool_metadata = (
                         getattr(tool_message, "metadata", {}) if tool_message else {}
+                    )
+                    review_usage = (
+                        raw_tool_metadata.get("review_llm_usage")
+                        if isinstance(raw_tool_metadata, dict)
+                        else None
+                    )
+                    if isinstance(review_usage, dict) and review_usage:
+                        usage_entries.append(review_usage)
+                        llm_call_count += 1
+                    tool_metadata = sanitize_trace_metadata(
+                        raw_tool_metadata
                     )
                     records.append(
                         ToolInvocationRecord(

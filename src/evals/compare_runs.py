@@ -1,4 +1,4 @@
-"""Build a fairness-checked comparison from S0/S1/S2/S3 reports."""
+"""Build a fairness-checked comparison from S0/S1/S2/S3/S4 reports."""
 
 from __future__ import annotations
 
@@ -65,12 +65,13 @@ def merge_reports(label: str, values: list[str]) -> EvaluationReport:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare QueryMind S0/S1/S2 and optional S3 runs"
+        description="Compare QueryMind S0/S1/S2 and optional S3/S4 runs"
     )
     parser.add_argument("--s0-report", action="append", required=True)
     parser.add_argument("--s1-report", action="append", required=True)
     parser.add_argument("--s2-report", action="append", required=True)
     parser.add_argument("--s3-report", action="append")
+    parser.add_argument("--s4-report", action="append")
     parser.add_argument("--output-dir", required=True)
     return parser.parse_args()
 
@@ -84,6 +85,8 @@ def main() -> None:
     }
     if args.s3_report:
         report_groups["s3"] = args.s3_report
+    if args.s4_report:
+        report_groups["s4"] = args.s4_report
     repeat_counts = {
         len(values)
         for values in report_groups.values()

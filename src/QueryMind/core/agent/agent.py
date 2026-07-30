@@ -5,51 +5,53 @@ This module provides the main Agent class that orchestrates the interaction
 between LLM services, tools, and conversation storage.
 """
 
+import logging
+import re
 import traceback
 import uuid
-import re
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, List, Optional
 
+from QueryMind.capabilities.agent_memory import AgentMemory
+from QueryMind.capabilities.schema_management import SchemaManagementService
+from QueryMind.capabilities.schema_memory import SchemaMemory
 from QueryMind.components import (
-    UiComponent,
-    SimpleTextComponent,
-    RichTextComponent,
-    StatusBarUpdateComponent,
-    TaskTrackerUpdateComponent,
     ChatInputUpdateComponent,
+    RichTextComponent,
+    SimpleTextComponent,
+    StatusBarUpdateComponent,
     StatusCardComponent,
     Task,
+    TaskTrackerUpdateComponent,
+    UiComponent,
 )
-from .config import AgentConfig
-from QueryMind.core.storage import ConversationStore
-from QueryMind.core.llm import LlmService
-from QueryMind.core.system_prompt import SystemPromptBuilder
-from QueryMind.core.storage import Conversation, Message
-from QueryMind.core.llm import LlmMessage, LlmRequest, LlmResponse
-from QueryMind.core.tool import ToolCall, ToolContext, ToolResult, ToolSchema
-from QueryMind.core.user import User
-from QueryMind.core.registry import ToolRegistry
-from QueryMind.core.system_prompt import DefaultSystemPromptBuilder
-from QueryMind.core.hook import LifecycleHook
-from QueryMind.core.middleware import LlmMiddleware
-from QueryMind.core.workflow import WorkflowHandler, DefaultWorkflowHandler
-from QueryMind.core.recovery import ErrorRecoveryStrategy, RecoveryActionType
-from QueryMind.core.enricher import ToolContextEnricher
-from QueryMind.core.enhancer import LlmContextEnhancer, DefaultLlmContextEnhancer
-from QueryMind.core.filter import ConversationFilter
-from QueryMind.core.observability import ObservabilityProvider
-from QueryMind.core.user.resolver import UserResolver
-from QueryMind.core.user.request_context import RequestContext
 from QueryMind.core.agent.config import UiFeature
 from QueryMind.core.agent.governance import SchemaGovernanceManager
 from QueryMind.core.audit import AuditLogger
-from QueryMind.capabilities.agent_memory import AgentMemory
-from QueryMind.capabilities.schema_memory import SchemaMemory
-from QueryMind.capabilities.schema_management import SchemaManagementService
-from .conversation_title import ensure_conversation_title
-from .query_plan import QueryPlanMode, build_schema_evidence
+from QueryMind.core.enhancer import DefaultLlmContextEnhancer, LlmContextEnhancer
+from QueryMind.core.enricher import ToolContextEnricher
+from QueryMind.core.filter import ConversationFilter
+from QueryMind.core.hook import LifecycleHook
+from QueryMind.core.llm import LlmMessage, LlmRequest, LlmResponse, LlmService
+from QueryMind.core.middleware import LlmMiddleware
+from QueryMind.core.observability import ObservabilityProvider
+from QueryMind.core.recovery import ErrorRecoveryStrategy
+from QueryMind.core.registry import ToolRegistry
+from QueryMind.core.storage import Conversation, ConversationStore, Message
+from QueryMind.core.system_prompt import DefaultSystemPromptBuilder, SystemPromptBuilder
+from QueryMind.core.tool import ToolCall, ToolContext, ToolResult, ToolSchema
+from QueryMind.core.user import User
+from QueryMind.core.user.request_context import RequestContext
+from QueryMind.core.user.resolver import UserResolver
+from QueryMind.core.workflow import DefaultWorkflowHandler, WorkflowHandler
 
-import logging
+from .config import AgentConfig
+from .conversation_title import ensure_conversation_title
+from .failure_recovery import (
+    FailureRecoveryState,
+    build_failure_recovery_prompt,
+)
+from .query_plan import QueryPlanMode, build_schema_evidence
+from .sql_review import SqlReviewMode
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +113,16 @@ grouping, or time-series structure. The runtime makes the final risk decision;
 if it rejects an unplanned SQL, submit a schema-grounded plan and retry. Do not
 submit a plan for a clearly low-risk one-table query merely out of habit.
 """.strip()
+_SQL_REVIEW_PROMPT = """
+## Independent SQL Intent Review
+
+For every high-risk SQL candidate, call `review_sql_intent` after schema
+retrieval and query planning but before `run_sql`. The review must describe the
+metric, one-row grain, filters, DISTINCT need, join cardinality, null handling,
+ordering, limit, and exact output shape. If the reviewer says revise, change the
+plan or SQL and review the new exact SQL again. If it says clarify, do not guess.
+Low-risk SQL may be exempt; the runtime makes the final decision.
+""".strip()
 
 
 def _normalize_sql_text(sql: str) -> str:
@@ -120,7 +132,11 @@ def _normalize_sql_text(sql: str) -> str:
 def _is_rejected_metadata_sql(tool_call: ToolCall, result: ToolResult) -> bool:
     if tool_call.name != "run_sql" or result.success:
         return False
-    if str(result.metadata.get("rejection_stage") or "") != "governance":
+    if str(result.metadata.get("rejection_stage") or "") in {
+        "permission",
+        "injection",
+        "complexity",
+    }:
         return False
     sql = tool_call.arguments.get("sql")
     return isinstance(sql, str) and bool(_METADATA_SQL_REFERENCE_RE.search(sql))
@@ -140,6 +156,30 @@ def _is_query_plan_rejection(result: ToolResult) -> bool:
 def _query_plan_recovery_tools(tool_schemas: List[ToolSchema]) -> List[ToolSchema]:
     allowed = {"schema_retrieve", "submit_query_plan"}
     return [tool for tool in tool_schemas if tool.name in allowed]
+
+
+def _failure_recovery_tools(
+    tool_schemas: List[ToolSchema],
+    allowed_tools: List[str],
+) -> List[ToolSchema]:
+    allowed = set(allowed_tools)
+    return [tool for tool in tool_schemas if tool.name in allowed]
+
+
+def _apply_sql_review_tool_gate(
+    tool_schemas: List[ToolSchema],
+    context_metadata: Dict[str, Any],
+    review_mode: SqlReviewMode,
+) -> List[ToolSchema]:
+    """Hide run_sql while an accepted high-risk plan awaits independent review."""
+    if review_mode == SqlReviewMode.DISABLED:
+        return tool_schemas
+    plan_accepted = str(context_metadata.get("query_plan_status") or "") == "accepted"
+    review = context_metadata.get("sql_intent_review")
+    review_approved = isinstance(review, dict) and bool(review.get("approved"))
+    if not plan_accepted or review_approved:
+        return tool_schemas
+    return [tool for tool in tool_schemas if tool.name != "run_sql"]
 
 
 def _backfill_schema_retrieve_query(
@@ -1043,6 +1083,13 @@ class Agent:
         metadata_recovery_attempts = 0
         query_plan_rejections = 0
         query_plan_recovery_pending = False
+        failure_recovery_state = (
+            FailureRecoveryState(
+                max_same_failure_retries=self.config.max_same_failure_retries
+            )
+            if self.config.structured_failure_recovery
+            else None
+        )
         all_tool_results: List[Dict[str, Any]] = []
         request_metadata = {
             **dict(request_context.metadata or {}),
@@ -1119,6 +1166,30 @@ class Agent:
                 request_metadata.pop("query_plan_recovery", None)
                 request_metadata.pop("query_plan_recovery_exhausted", None)
                 request_metadata.pop("query_plan_rejections", None)
+
+            structured_decision = (
+                failure_recovery_state.pending
+                if failure_recovery_state is not None
+                else None
+            )
+            if structured_decision is not None:
+                visible_tool_schemas = _failure_recovery_tools(
+                    visible_tool_schemas,
+                    structured_decision.allowed_tools,
+                )
+                system_prompt = "\n\n".join(
+                    part
+                    for part in [
+                        system_prompt or "",
+                        build_failure_recovery_prompt(structured_decision),
+                    ]
+                    if part
+                )
+                request_metadata["structured_failure_recovery"] = (
+                    structured_decision.as_metadata()
+                )
+            else:
+                request_metadata.pop("structured_failure_recovery", None)
 
             if self.observability_provider and prompt_span:
                 prompt_span.set_attribute(
@@ -1343,6 +1414,13 @@ class Agent:
                             result.metadata["query_plan_routing"] = dict(
                                 query_plan_routing
                             )
+                        sql_review_routing = context.metadata.get(
+                            "sql_review_routing"
+                        )
+                        if isinstance(sql_review_routing, dict):
+                            result.metadata["sql_review_routing"] = dict(
+                                sql_review_routing
+                            )
 
                     if _is_rejected_metadata_sql(tool_call, result):
                         metadata_query_rejections += 1
@@ -1410,6 +1488,16 @@ class Agent:
                                     },
                             )
 
+                    if failure_recovery_state is not None:
+                        failure_decision = failure_recovery_state.observe(
+                            tool_call,
+                            result,
+                        )
+                        if failure_decision is not None:
+                            result.metadata["failure_recovery"] = (
+                                failure_decision.as_metadata()
+                            )
+
                     if _is_query_plan_rejection(result):
                         query_plan_rejections += 1
                         query_plan_recovery_pending = True
@@ -1432,6 +1520,8 @@ class Agent:
                             result.metadata.update(live_schema_snapshot)
                             context.metadata.update(live_schema_snapshot)
                             request_metadata.update(live_schema_snapshot)
+                            context.metadata.pop("sql_intent_review", None)
+                            request_metadata.pop("sql_intent_review", None)
                     if tool_call.name == "submit_query_plan":
                         query_plan_snapshot = {
                             key: result.metadata[key]
@@ -1795,6 +1885,21 @@ You can:
         )
         query_plan_mode = self.config.effective_query_plan_mode()
         merged_metadata["query_plan_mode"] = query_plan_mode.value
+        sql_review_mode = self.config.effective_sql_review_mode()
+        merged_metadata["sql_review_mode"] = sql_review_mode.value
+        visible_tool_schemas = _apply_sql_review_tool_gate(
+            visible_tool_schemas,
+            merged_metadata,
+            sql_review_mode,
+        )
+        merged_metadata["sql_review_pending"] = (
+            sql_review_mode != SqlReviewMode.DISABLED
+            and str(merged_metadata.get("query_plan_status") or "") == "accepted"
+            and not bool(
+                isinstance(merged_metadata.get("sql_intent_review"), dict)
+                and merged_metadata["sql_intent_review"].get("approved")
+            )
+        )
         if (
             query_plan_mode == QueryPlanMode.ADAPTIVE
             and any(tool.name == "submit_query_plan" for tool in visible_tool_schemas)
@@ -1802,6 +1907,15 @@ You can:
             system_prompt = "\n\n".join(
                 part
                 for part in [system_prompt or "", _ADAPTIVE_QUERY_PLAN_PROMPT]
+                if part
+            )
+        if (
+            sql_review_mode != SqlReviewMode.DISABLED
+            and any(tool.name == "review_sql_intent" for tool in visible_tool_schemas)
+        ):
+            system_prompt = "\n\n".join(
+                part
+                for part in [system_prompt or "", _SQL_REVIEW_PROMPT]
                 if part
             )
 

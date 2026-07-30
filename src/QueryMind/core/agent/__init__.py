@@ -41,6 +41,22 @@ from .query_plan import (
     validate_query_plan_intent,
     validate_sql_against_query_plan,
 )
+from .failure_recovery import (
+    FailureCategory,
+    FailureDecision,
+    FailureRecoveryState,
+    RecoveryAction,
+    build_failure_recovery_prompt,
+    classify_tool_failure,
+)
+from .sql_review import (
+    SqlIntentReview,
+    SqlReviewMode,
+    parse_sql_intent_review,
+    parse_sql_review_mode,
+    requires_sql_review,
+    sql_fingerprint,
+)
 
 __all__ = [
     "Agent",
@@ -74,4 +90,16 @@ __all__ = [
     "validate_query_plan_evidence",
     "validate_query_plan_intent",
     "validate_sql_against_query_plan",
+    "FailureCategory",
+    "FailureDecision",
+    "FailureRecoveryState",
+    "RecoveryAction",
+    "build_failure_recovery_prompt",
+    "classify_tool_failure",
+    "SqlIntentReview",
+    "SqlReviewMode",
+    "parse_sql_intent_review",
+    "parse_sql_review_mode",
+    "requires_sql_review",
+    "sql_fingerprint",
 ]

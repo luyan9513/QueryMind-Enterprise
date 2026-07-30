@@ -21,6 +21,7 @@ from .visualize_data import VisualizeDataTool
 from .agent_memory import SaveQuestionToolArgsTool, SearchSavedCorrectToolUsesTool, SaveTextMemoryTool
 from .schema_retrieve import SchemaRetrieveTool, SchemaRetrieveToolArgs, SearchMode
 from .query_plan import SubmitQueryPlanTool
+from .sql_review import ReviewSqlIntentArgs, ReviewSqlIntentTool
 
 __all__ = [
     # File system
@@ -51,4 +52,7 @@ __all__ = [
     "SearchMode",
     # Query Plan
     "SubmitQueryPlanTool",
+    # SQL semantic review
+    "ReviewSqlIntentArgs",
+    "ReviewSqlIntentTool",
 ]

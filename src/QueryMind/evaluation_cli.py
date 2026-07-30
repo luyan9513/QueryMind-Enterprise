@@ -94,10 +94,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--evaluation-mode",
-        choices=["s0", "s1", "s2", "s3"],
+        choices=["s0", "s1", "s2", "s3", "s4"],
         help=(
             "Evaluation strategy: s0 single-shot, s1 Agent without Query Plan, "
-            "s2 Agent with mandatory Query Plan, or s3 adaptive plan routing "
+            "s2 mandatory plan, s3 adaptive routing, or s4 adaptive routing "
+            "with structured recovery and high-risk SQL review "
             "(defaults to EVAL_MODE or s2)"
         ),
     )
@@ -234,6 +235,11 @@ def _build_config_snapshot(
         "query_plan_mode": (
             runtime.agent_config.effective_query_plan_mode().value
         ),
+        "structured_failure_recovery": (
+            runtime.agent_config.structured_failure_recovery
+        ),
+        "max_same_failure_retries": runtime.agent_config.max_same_failure_retries,
+        "sql_review_mode": runtime.agent_config.effective_sql_review_mode().value,
         "judge_model": judge_model,
         "judge_provider": judge_provider,
         "pass_threshold": pass_threshold,

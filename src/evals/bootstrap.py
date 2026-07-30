@@ -358,8 +358,15 @@ def build_runtime_from_env(
     query_plan_mode = QueryPlanMode.DISABLED
     if resolved_mode == EvaluationMode.S2_AGENT_WITH_PLAN:
         query_plan_mode = QueryPlanMode.ALWAYS
-    elif resolved_mode == EvaluationMode.S3_ADAPTIVE_AGENT:
+    elif resolved_mode in {
+        EvaluationMode.S3_ADAPTIVE_AGENT,
+        EvaluationMode.S4_REVIEWED_AGENT,
+    }:
         query_plan_mode = QueryPlanMode.ADAPTIVE
+    structured_failure_recovery = resolved_mode == EvaluationMode.S4_REVIEWED_AGENT
+    sql_review_mode = (
+        "high_risk" if resolved_mode == EvaluationMode.S4_REVIEWED_AGENT else "disabled"
+    )
     require_query_plan = query_plan_mode != QueryPlanMode.DISABLED
     agent_temperature = resolve_agent_temperature()
     business_schemas = ["person", "humanresources", "production", "purchasing", "sales"]
@@ -451,6 +458,11 @@ def build_runtime_from_env(
     runtime.agent_config.max_query_plan_retries = max_query_plan_retries
     runtime.agent_config.require_query_plan = require_query_plan
     runtime.agent_config.query_plan_mode = query_plan_mode
+    runtime.agent_config.structured_failure_recovery = structured_failure_recovery
+    runtime.agent_config.max_same_failure_retries = int(
+        os.getenv("EVAL_MAX_SAME_FAILURE_RETRIES", "2")
+    )
+    runtime.agent_config.sql_review_mode = sql_review_mode
     runtime.agent_config.temperature = agent_temperature
     return runtime
 

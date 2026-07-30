@@ -34,6 +34,12 @@ from QueryMind.core.agent.query_plan import (
     parse_query_plan_mode,
     validate_sql_against_query_plan,
 )
+from QueryMind.core.agent.sql_review import (
+    SqlReviewMode,
+    parse_sql_review_mode,
+    requires_sql_review,
+    sql_fingerprint,
+)
 from QueryMind.core.tool import Tool, ToolContext, ToolRejection
 from QueryMind.core.user import User
 from QueryMind.capabilities.sql_runner.models import RunSqlToolArgs
@@ -57,6 +63,7 @@ class RLSToolRegistry(ToolRegistry):
         audit_config=None,
         require_query_plan: bool = False,
         query_plan_mode: str | QueryPlanMode | None = None,
+        sql_review_mode: str | SqlReviewMode | None = None,
     ):
         """Initialize RLS Registry.
         
@@ -75,6 +82,7 @@ class RLSToolRegistry(ToolRegistry):
             require_query_plan=require_query_plan,
         )
         self.require_query_plan = self.query_plan_mode != QueryPlanMode.DISABLED
+        self.sql_review_mode = parse_sql_review_mode(sql_review_mode)
     
     def _load_config(self, config_path: str) -> None:
         """Load RLS configuration from YAML file."""
@@ -509,7 +517,39 @@ class RLSToolRegistry(ToolRegistry):
                         code="query_plan_sql_mismatch",
                     )
 
-        # 4. SQL Semantics Validation
+        # 4. Independent SQL Intent Review
+        review_required = requires_sql_review(
+            original_sql,
+            context.metadata,
+            mode=self.sql_review_mode,
+            dialect=str(context.metadata.get("dialect") or "").strip() or None,
+        )
+        context.metadata["sql_review_routing"] = {
+            "mode": self.sql_review_mode.value,
+            "required": review_required,
+        }
+        if review_required:
+            review = context.metadata.get("sql_intent_review")
+            if not isinstance(review, dict) or not bool(review.get("approved")):
+                return ToolRejection(
+                    reason=(
+                        "SQL rejected: this high-risk query requires an independent "
+                        "review_sql_intent approval before run_sql."
+                    ),
+                    stage="semantic_review",
+                    code="sql_semantic_review_required",
+                )
+            if str(review.get("sql_fingerprint") or "") != sql_fingerprint(original_sql):
+                return ToolRejection(
+                    reason=(
+                        "SQL rejected: the approved semantic review belongs to a "
+                        "different SQL candidate. Review this exact SQL again."
+                    ),
+                    stage="semantic_review",
+                    code="sql_semantic_review_stale",
+                )
+
+        # 5. SQL Semantics Validation
         semantics_reason = sql_semantics_rejection_reason(
             original_sql,
             user_message=context.raw_user_message,
@@ -528,7 +568,7 @@ class RLSToolRegistry(ToolRegistry):
                 code="sql_semantics",
             )
 
-        # 5. Territory-Based RLS
+        # 6. Territory-Based RLS
         if self._should_apply_rls(sql):
             sql = self._apply_territory_rls(sql, user)
             
@@ -590,6 +630,7 @@ def create_rls_registry(
     audit_logger=None,
     require_query_plan: bool = False,
     query_plan_mode: str | QueryPlanMode | None = None,
+    sql_review_mode: str | SqlReviewMode | None = None,
 ) -> RLSToolRegistry:
     """Create an RLS-enabled ToolRegistry.
     
@@ -605,4 +646,5 @@ def create_rls_registry(
         audit_logger=audit_logger,
         require_query_plan=require_query_plan,
         query_plan_mode=query_plan_mode,
+        sql_review_mode=sql_review_mode,
     )

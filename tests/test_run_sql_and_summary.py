@@ -228,6 +228,11 @@ def test_metadata_query_recovery_is_narrow_and_schema_only() -> None:
     assert "Do not call tools again" in exhausted_prompt
     assert "ask the user" in exhausted_prompt
 
+    planning_rejected = rejected.model_copy(
+        update={"metadata": {"rejection_stage": "planning"}}
+    )
+    assert _is_rejected_metadata_sql(metadata_call, planning_rejected) is True
+
 
 def test_agent_metadata_retry_limit_is_bounded() -> None:
     assert AgentConfig().max_metadata_query_retries == 2

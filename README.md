@@ -286,7 +286,15 @@ Two complete S3 runs on the same frozen 24-case benchmark both reached 54.17% st
 
 The normal chat default remains `QUERY_PLAN_MODE=always`. Adaptive routing is opt-in until a second data source and its own admission benchmark pass. See [the v0.5 implementation record](docs/portfolio/v0.5-adaptive-query-plan-routing.md).
 
-The latest formal Python test scope is `173 passed, 1 warning`.
+### v0.6 Structured Recovery and SQL Review Experiment
+
+The v0.6 experiment modifies the upstream Agent Loop with deterministic failure classification, repeated-failure fingerprints, action-specific recovery, and an optional high-risk SQL Reviewer. A separate S4 evaluation mode keeps this experiment isolated from S0-S3 and includes Reviewer usage in latency, tool, token, and cost metrics.
+
+The complete 24-case S4 run did not outperform S3. Strict accuracy stayed at 54.17%, while business accuracy fell from 62.50% to 54.17%, wrong-but-executed increased from 25.00% to 29.17%, P95 latency increased from 38.16 to 51.61 seconds, and estimated cost increased by 47.61%. The Reviewer approved 19 of 20 reviews, including several semantically wrong SQL queries.
+
+For that reason, `STRUCTURED_FAILURE_RECOVERY=false` and `SQL_REVIEW_MODE=disabled` remain the normal defaults. The code and negative result are retained as auditable experimental evidence, not presented as an accuracy improvement. See [the v0.6 implementation and evaluation record](docs/portfolio/v0.6-structured-recovery-and-sql-review.md).
+
+The latest formal Python test scope is `181 passed, 1 warning`.
 
 ### Web Component
 
@@ -311,7 +319,7 @@ The handbook expands the README into components, advanced-features, use-case, an
 
 ### Ongoing
 
-1. Use the completed S3 adaptive-routing runs to add business-semantic contract checks for metric definition, ordering, aliases, and output grain. Keep the fast path generic and do not add benchmark table names or answer-specific rules. See [the v0.5 implementation record](docs/portfolio/v0.5-adaptive-query-plan-routing.md).
+1. Build data-source-owned semantic contracts for metric formulas, deduplication keys, time fields, output grain, ordering, and aliases. The v0.6 S4 experiment showed that an additional LLM Reviewer without trusted business definitions increased cost and latency without improving accuracy. See [the v0.6 record](docs/portfolio/v0.6-structured-recovery-and-sql-review.md).
 
 <figure>
   <img src="docs/figures/use-cases/eval-driven%20iterations.png" alt="Eval-driven iterations" />

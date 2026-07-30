@@ -21,6 +21,11 @@ MAX_TOOL_ITERATIONS = int(os.getenv("MAX_TOOL_ITERATIONS", "25"))
 AGENT_TEMPERATURE = float(os.getenv("AGENT_TEMPERATURE", "0.0"))
 MAX_METADATA_QUERY_RETRIES = int(os.getenv("MAX_METADATA_QUERY_RETRIES", "2"))
 MAX_QUERY_PLAN_RETRIES = int(os.getenv("MAX_QUERY_PLAN_RETRIES", "3"))
+STRUCTURED_FAILURE_RECOVERY = os.getenv(
+    "STRUCTURED_FAILURE_RECOVERY", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+MAX_SAME_FAILURE_RETRIES = int(os.getenv("MAX_SAME_FAILURE_RETRIES", "2"))
+SQL_REVIEW_MODE_VALUE = os.getenv("SQL_REVIEW_MODE", "disabled")
 LEGACY_REQUIRE_QUERY_PLAN = os.getenv(
     "REQUIRE_QUERY_PLAN", "true"
 ).strip().lower() in {
@@ -34,9 +39,11 @@ QUERY_PLAN_MODE_VALUE = os.getenv("QUERY_PLAN_MODE")
 from QueryMind.core import Agent, AgentConfig, ToolRegistry  # noqa: E402
 from QueryMind.core.agent import (  # noqa: E402
     QueryPlanMode,
+    SqlReviewMode,
     build_schema_governance_stack,
     build_sql_governance_stack,
     parse_query_plan_mode,
+    parse_sql_review_mode,
 )
 from QueryMind.core.enhancer import (  # noqa: E402
     CompositeLlmContextEnhancer,
@@ -81,6 +88,7 @@ from QueryMind.tools import (  # noqa: E402
     ReadFileTool,
     RunPythonFileTool,
     RunSqlTool,
+    ReviewSqlIntentTool,
     SaveQuestionToolArgsTool,
     SaveTextMemoryTool,
     SchemaRetrieveTool,
@@ -95,6 +103,7 @@ QUERY_PLAN_MODE = parse_query_plan_mode(
     QUERY_PLAN_MODE_VALUE,
     require_query_plan=LEGACY_REQUIRE_QUERY_PLAN,
 )
+SQL_REVIEW_MODE = parse_sql_review_mode(SQL_REVIEW_MODE_VALUE)
 REQUIRE_QUERY_PLAN = QUERY_PLAN_MODE != QueryPlanMode.DISABLED
 from QueryMind.rls_registry import RLSToolRegistry  # noqa: E402
 
@@ -144,6 +153,8 @@ def register_tools(
     schema_memory: Neo4jMem0SchemaMemory,
     *,
     query_plan_mode: QueryPlanMode,
+    sql_review_mode: SqlReviewMode,
+    llm_service,
 ) -> None:
     results_file_system = LocalFileSystem(working_directory=str(QUERY_RESULTS_DIR))
 
@@ -165,6 +176,10 @@ def register_tools(
     ]
     if query_plan_mode != QueryPlanMode.DISABLED:
         core_tools.append((SubmitQueryPlanTool(), ["user", "admin"]))
+    if sql_review_mode != SqlReviewMode.DISABLED:
+        core_tools.append(
+            (ReviewSqlIntentTool(llm_service=llm_service), ["user", "admin"])
+        )
     memory_tools = [
         (SaveQuestionToolArgsTool(), ["user", "admin"]),
         (SearchSavedCorrectToolUsesTool(), ["user", "admin"]),
@@ -272,11 +287,14 @@ def build_agent() -> Agent:
         ),
         require_query_plan=REQUIRE_QUERY_PLAN,
         query_plan_mode=QUERY_PLAN_MODE,
+        sql_review_mode=SQL_REVIEW_MODE,
     )
     register_tools(
         registry,
         schema_memory,
         query_plan_mode=QUERY_PLAN_MODE,
+        sql_review_mode=SQL_REVIEW_MODE,
+        llm_service=llm_service,
     )
 
     agent_config = AgentConfig(
@@ -286,6 +304,9 @@ def build_agent() -> Agent:
         max_query_plan_retries=MAX_QUERY_PLAN_RETRIES,
         require_query_plan=REQUIRE_QUERY_PLAN,
         query_plan_mode=QUERY_PLAN_MODE,
+        structured_failure_recovery=STRUCTURED_FAILURE_RECOVERY,
+        max_same_failure_retries=MAX_SAME_FAILURE_RETRIES,
+        sql_review_mode=SQL_REVIEW_MODE,
         schema_search_default_threshold=0.4,
     )
 
