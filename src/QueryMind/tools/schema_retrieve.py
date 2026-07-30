@@ -23,6 +23,10 @@ from QueryMind.components.rich.schema_retrieve import (
 from QueryMind.components.simple import SimpleTextComponent
 from QueryMind.capabilities.schema_memory import SchemaMemory
 from QueryMind.capabilities.schema_memory.models import SchemaSearchResult
+from QueryMind.core.agent.semantic_contract import (
+    SemanticContractCatalog,
+    format_semantic_contracts_for_llm,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +210,7 @@ class SchemaRetrieveTool(Tool[SchemaRetrieveToolArgs]):
         schema_memory: SchemaMemory,
         *,
         max_initial_results: Optional[int] = None,
+        semantic_contract_catalog: SemanticContractCatalog | None = None,
     ):
         """Initialize the tool with a SchemaMemory instance.
 
@@ -213,6 +218,7 @@ class SchemaRetrieveTool(Tool[SchemaRetrieveToolArgs]):
             schema_memory: SchemaMemory implementation for schema retrieval
         """
         self._schema_memory = schema_memory
+        self._semantic_contract_catalog = semantic_contract_catalog
         configured_limit = max_initial_results
         if configured_limit is None:
             try:
@@ -272,6 +278,16 @@ When exact physical table names are already known, pass table_names to fetch the
         )
         context_seed_tables = context_schema_retrieve.get("seed_tables", [])
         context_seed_table_refs = context_schema_retrieve.get("seed_table_refs", [])
+        contract_query = "\n".join(
+            item
+            for item in [context.raw_user_message or "", args.query or ""]
+            if item.strip()
+        )
+        semantic_contracts = (
+            self._semantic_contract_catalog.build_runtime_snapshot(contract_query)
+            if self._semantic_contract_catalog is not None
+            else {}
+        )
 
         try:
             if not exact_table_refs and not args.query.strip():
@@ -385,6 +401,11 @@ When exact physical table names are already known, pass table_names to fetch the
                     "\nExact table names not found in Schema Memory: "
                     + ", ".join(missing_exact_tables)
                 )
+            contract_content = format_semantic_contracts_for_llm(
+                semantic_contracts
+            )
+            if contract_content:
+                llm_content += "\n\n" + contract_content
 
             # Build UI component
             ui_component = self._build_ui_component(
@@ -443,6 +464,7 @@ When exact physical table names are already known, pass table_names to fetch the
                 "exact_table_names": [ref["full_name"] for ref in exact_table_refs],
                 "missing_exact_tables": missing_exact_tables,
                 "seed_tables": [ref["full_name"] for ref in seed_table_refs],
+                "semantic_contracts": semantic_contracts,
             }
 
             return ToolResult(
@@ -473,6 +495,7 @@ When exact physical table names are already known, pass table_names to fetch the
                 "exact_table_names": [ref["full_name"] for ref in exact_table_refs],
                 "missing_exact_tables": [ref["full_name"] for ref in exact_table_refs],
                 "seed_tables": [ref["full_name"] for ref in seed_table_refs],
+                "semantic_contracts": semantic_contracts,
             }
 
             return ToolResult(

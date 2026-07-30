@@ -294,7 +294,15 @@ The complete 24-case S4 run did not outperform S3. Strict accuracy stayed at 54.
 
 For that reason, `STRUCTURED_FAILURE_RECOVERY=false` and `SQL_REVIEW_MODE=disabled` remain the normal defaults. The code and negative result are retained as auditable experimental evidence, not presented as an accuracy improvement. See [the v0.6 implementation and evaluation record](docs/portfolio/v0.6-structured-recovery-and-sql-review.md).
 
-The latest formal Python test scope is `181 passed, 1 warning`.
+### v0.7 Data-source Semantic Contracts
+
+The v0.7 work adds versioned, data-source-owned metric contracts between Schema Retrieve, Query Plan, and governed SQL execution. Contracts define approved formulas, source tables, required fields, base grain, time fields, filters, and aliases. The generic engine contains no AdventureWorks table or question rules; AdventureWorks is one evaluated catalog instance with 14 approved metrics.
+
+The final S5 run completed the same frozen 24 questions under the same model and snapshots. It reached 58.33% strict accuracy (14/24), 66.67% business accuracy (16/24), 87.50% answer coverage (21/24), 76.19% business precision among executed answers, and 20.83% wrong-but-executed (5/24). P50/P95 Agent latency was 22.11/33.92 seconds. The S0-S5 comparison reported `comparable=true`; versus the best S3 run, S5 gained one strict and one business-correct case while keeping coverage unchanged.
+
+These are small-sample AdventureWorks results, not a cross-database guarantee. Normal chat keeps `SEMANTIC_CONTRACT_MODE=disabled`; every new data source needs its own catalog, frozen benchmark, and admission result. See [the v0.7 design and evidence record](docs/portfolio/v0.7-semantic-contract-governance.md).
+
+The latest formal Python test scope is `192 passed, 1 warning`.
 
 ### Web Component
 
@@ -319,7 +327,7 @@ The handbook expands the README into components, advanced-features, use-case, an
 
 ### Ongoing
 
-1. Build data-source-owned semantic contracts for metric formulas, deduplication keys, time fields, output grain, ordering, and aliases. The v0.6 S4 experiment showed that an additional LLM Reviewer without trusted business definitions increased cost and latency without improving accuracy. See [the v0.6 record](docs/portfolio/v0.6-structured-recovery-and-sql-review.md).
+1. Validate the v0.7 semantic-contract engine on a second data source with its own catalog, benchmark, confidence intervals, coverage target, and wrong-execution threshold. AdventureWorks results do not transfer automatically. See [the v0.7 record](docs/portfolio/v0.7-semantic-contract-governance.md).
 
 <figure>
   <img src="docs/figures/use-cases/eval-driven%20iterations.png" alt="Eval-driven iterations" />

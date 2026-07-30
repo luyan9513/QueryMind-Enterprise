@@ -9,11 +9,25 @@ from QueryMind.core.agent.query_plan import (
     validate_query_plan_evidence,
     validate_query_plan_intent,
 )
+from QueryMind.core.agent.semantic_contract import (
+    SemanticContractMode,
+    parse_semantic_contract_mode,
+    validate_query_plan_semantic_contracts,
+)
 from QueryMind.core.tool import Tool, ToolContext, ToolResult
 
 
 class SubmitQueryPlanTool(Tool[QueryPlan]):
     """Persist a validated, turn-local plan for SQL alignment checks."""
+
+    def __init__(
+        self,
+        *,
+        semantic_contract_mode: str | SemanticContractMode = "disabled",
+    ) -> None:
+        self.semantic_contract_mode = parse_semantic_contract_mode(
+            semantic_contract_mode
+        )
 
     @property
     def name(self) -> str:
@@ -25,7 +39,7 @@ class SubmitQueryPlanTool(Tool[QueryPlan]):
             "Submit the exact query plan after schema retrieval and before run_sql. "
             "Cite only retrieved physical tables and qualified columns. The plan "
             "must define row grain, exact output columns, filters, aggregation, "
-            "grouping, ordering, and unresolved business questions."
+            "grouping, ordering, semantic contract IDs, and unresolved questions."
         )
 
     def get_args_schema(self) -> Type[QueryPlan]:
@@ -43,6 +57,27 @@ class SubmitQueryPlanTool(Tool[QueryPlan]):
             issue for issue in intent_check.issues if issue not in check.issues
         )
         check.evidence.update(intent_check.evidence)
+        contract_check = validate_query_plan_semantic_contracts(
+            args,
+            context.metadata,
+            mode=self.semantic_contract_mode,
+            dialect=str(context.metadata.get("dialect") or "").strip() or None,
+        )
+        if self.semantic_contract_mode == SemanticContractMode.REQUIRED:
+            check.issues.extend(
+                issue for issue in contract_check.issues if issue not in check.issues
+            )
+        check.evidence["semantic_contract"] = dict(contract_check.evidence)
+        check.evidence["semantic_contract"].update(
+            {
+                "passed": contract_check.passed,
+                "issues": list(contract_check.issues),
+            }
+        )
+        if contract_check.advisories:
+            check.evidence["semantic_contract"]["advisories"] = list(
+                contract_check.advisories
+            )
         plan_data = args.model_dump(mode="json")
         accepted = check.passed
         status = "accepted" if accepted else "rejected"
@@ -74,7 +109,7 @@ class SubmitQueryPlanTool(Tool[QueryPlan]):
                 "Query plan rejected. Retrieve the missing schema evidence or ask "
                 f"the user to resolve ambiguity, then submit a new plan: {issue_text}"
             ),
-            error="Query plan is not grounded in available schema evidence",
+            error="Query plan is not grounded in schema and semantic evidence",
             metadata={
                 "tool_name": self.name,
                 "rejection_stage": "planning",

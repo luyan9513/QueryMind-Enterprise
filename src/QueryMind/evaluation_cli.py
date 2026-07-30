@@ -94,11 +94,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--evaluation-mode",
-        choices=["s0", "s1", "s2", "s3", "s4"],
+        choices=["s0", "s1", "s2", "s3", "s4", "s5"],
         help=(
             "Evaluation strategy: s0 single-shot, s1 Agent without Query Plan, "
             "s2 mandatory plan, s3 adaptive routing, or s4 adaptive routing "
-            "with structured recovery and high-risk SQL review "
+            "with structured recovery and high-risk SQL review, or s5 mandatory "
+            "plans with required data-source semantic contracts "
             "(defaults to EVAL_MODE or s2)"
         ),
     )
@@ -240,6 +241,24 @@ def _build_config_snapshot(
         ),
         "max_same_failure_retries": runtime.agent_config.max_same_failure_retries,
         "sql_review_mode": runtime.agent_config.effective_sql_review_mode().value,
+        "semantic_contract_mode": (
+            runtime.agent_config.effective_semantic_contract_mode().value
+        ),
+        "semantic_contract_data_source_id": (
+            runtime.semantic_contract_catalog.data_source_id
+            if runtime.semantic_contract_catalog is not None
+            else None
+        ),
+        "semantic_contract_version": (
+            runtime.semantic_contract_catalog.version
+            if runtime.semantic_contract_catalog is not None
+            else None
+        ),
+        "semantic_contract_hash": (
+            runtime.semantic_contract_catalog.fingerprint()
+            if runtime.semantic_contract_catalog is not None
+            else None
+        ),
         "judge_model": judge_model,
         "judge_provider": judge_provider,
         "pass_threshold": pass_threshold,

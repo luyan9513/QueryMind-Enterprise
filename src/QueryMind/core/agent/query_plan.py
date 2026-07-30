@@ -104,6 +104,14 @@ class QueryPlan(BaseModel):
     requires_ordering: bool = False
     limit: Optional[int] = Field(default=None, gt=0)
     business_definition_notes: List[str] = Field(default_factory=list)
+    semantic_contract_ids: List[str] = Field(
+        default_factory=list,
+        description="Approved data-source metric contract IDs used by this plan",
+    )
+    semantic_contract_version: Optional[str] = Field(
+        default=None,
+        description="Version of the matched data-source semantic contract catalog",
+    )
     unresolved_questions: List[str] = Field(
         default_factory=list,
         description="Ambiguities that must be clarified before SQL execution",

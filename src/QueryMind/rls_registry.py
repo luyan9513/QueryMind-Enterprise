@@ -40,6 +40,11 @@ from QueryMind.core.agent.sql_review import (
     requires_sql_review,
     sql_fingerprint,
 )
+from QueryMind.core.agent.semantic_contract import (
+    SemanticContractMode,
+    parse_semantic_contract_mode,
+    validate_sql_against_semantic_contracts,
+)
 from QueryMind.core.tool import Tool, ToolContext, ToolRejection
 from QueryMind.core.user import User
 from QueryMind.capabilities.sql_runner.models import RunSqlToolArgs
@@ -64,6 +69,7 @@ class RLSToolRegistry(ToolRegistry):
         require_query_plan: bool = False,
         query_plan_mode: str | QueryPlanMode | None = None,
         sql_review_mode: str | SqlReviewMode | None = None,
+        semantic_contract_mode: str | SemanticContractMode | None = None,
     ):
         """Initialize RLS Registry.
         
@@ -73,6 +79,7 @@ class RLSToolRegistry(ToolRegistry):
             audit_config: Optional audit config
             require_query_plan: Legacy switch requiring a plan before run_sql
             query_plan_mode: disabled, always, or adaptive SQL-shape routing
+            semantic_contract_mode: disabled, advisory, or required metric checks
         """
         super().__init__(audit_logger=audit_logger, audit_config=audit_config)
         self._load_config(config_path)
@@ -83,6 +90,9 @@ class RLSToolRegistry(ToolRegistry):
         )
         self.require_query_plan = self.query_plan_mode != QueryPlanMode.DISABLED
         self.sql_review_mode = parse_sql_review_mode(sql_review_mode)
+        self.semantic_contract_mode = parse_semantic_contract_mode(
+            semantic_contract_mode
+        )
     
     def _load_config(self, config_path: str) -> None:
         """Load RLS configuration from YAML file."""
@@ -440,6 +450,7 @@ class RLSToolRegistry(ToolRegistry):
             )
 
         # 3. Runtime Query Plan Alignment
+        accepted_query_plan = None
         if self.query_plan_mode != QueryPlanMode.DISABLED:
             raw_plan = context.metadata.get("query_plan")
             plan_status = str(context.metadata.get("query_plan_status") or "")
@@ -500,6 +511,7 @@ class RLSToolRegistry(ToolRegistry):
                         stage="planning",
                         code="query_plan_invalid",
                     )
+                accepted_query_plan = query_plan
 
                 plan_check = validate_sql_against_query_plan(
                     query_plan,
@@ -517,7 +529,36 @@ class RLSToolRegistry(ToolRegistry):
                         code="query_plan_sql_mismatch",
                     )
 
-        # 4. Independent SQL Intent Review
+        # 4. Data-source Semantic Contract
+        contract_check = validate_sql_against_semantic_contracts(
+            accepted_query_plan,
+            original_sql,
+            context.metadata,
+            mode=self.semantic_contract_mode,
+            dialect=str(context.metadata.get("dialect") or "").strip() or None,
+        )
+        context.metadata["semantic_contract_validation"] = {
+            "mode": self.semantic_contract_mode.value,
+            "passed": contract_check.passed,
+            "issues": list(contract_check.issues),
+            "advisories": list(contract_check.advisories),
+            "evidence": dict(contract_check.evidence),
+        }
+        if (
+            self.semantic_contract_mode == SemanticContractMode.REQUIRED
+            and not contract_check.passed
+        ):
+            issue_text = "; ".join(contract_check.issues[:8])
+            return ToolRejection(
+                reason=(
+                    "SQL rejected: it does not satisfy an approved data-source "
+                    f"semantic contract: {issue_text}"
+                ),
+                stage="semantic_contract",
+                code="semantic_contract_mismatch",
+            )
+
+        # 5. Independent SQL Intent Review
         review_required = requires_sql_review(
             original_sql,
             context.metadata,
@@ -549,7 +590,7 @@ class RLSToolRegistry(ToolRegistry):
                     code="sql_semantic_review_stale",
                 )
 
-        # 5. SQL Semantics Validation
+        # 6. SQL Semantics Validation
         semantics_reason = sql_semantics_rejection_reason(
             original_sql,
             user_message=context.raw_user_message,
@@ -568,7 +609,7 @@ class RLSToolRegistry(ToolRegistry):
                 code="sql_semantics",
             )
 
-        # 6. Territory-Based RLS
+        # 7. Territory-Based RLS
         if self._should_apply_rls(sql):
             sql = self._apply_territory_rls(sql, user)
             
@@ -631,6 +672,7 @@ def create_rls_registry(
     require_query_plan: bool = False,
     query_plan_mode: str | QueryPlanMode | None = None,
     sql_review_mode: str | SqlReviewMode | None = None,
+    semantic_contract_mode: str | SemanticContractMode | None = None,
 ) -> RLSToolRegistry:
     """Create an RLS-enabled ToolRegistry.
     
@@ -647,4 +689,5 @@ def create_rls_registry(
         require_query_plan=require_query_plan,
         query_plan_mode=query_plan_mode,
         sql_review_mode=sql_review_mode,
+        semantic_contract_mode=semantic_contract_mode,
     )

@@ -87,8 +87,11 @@ def test_parse_evaluation_mode_accepts_stable_aliases() -> None:
     assert parse_evaluation_mode(None) == EvaluationMode.S2_AGENT_WITH_PLAN
     assert parse_evaluation_mode("s3") == EvaluationMode.S3_ADAPTIVE_AGENT
     assert parse_evaluation_mode("s4") == EvaluationMode.S4_REVIEWED_AGENT
+    assert parse_evaluation_mode("s5") == (
+        EvaluationMode.S5_SEMANTIC_CONTRACT_AGENT
+    )
 
-    with pytest.raises(ValueError, match="s0, s1, s2, s3, s4"):
+    with pytest.raises(ValueError, match="s0, s1, s2, s3, s4, s5"):
         parse_evaluation_mode("unknown")
 
 

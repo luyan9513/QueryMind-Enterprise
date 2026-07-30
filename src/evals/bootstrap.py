@@ -30,7 +30,11 @@ from QueryMind.core.evaluation import (
     EvaluationRuntime,
     parse_evaluation_mode,
 )
-from QueryMind.core.agent import QueryPlanMode
+from QueryMind.core.agent import (
+    QueryPlanMode,
+    SemanticContractMode,
+    load_semantic_contract_catalog,
+)
 from QueryMind.core.llm import LlmService
 from QueryMind.core.recovery import ExponentialBackoffStrategy
 from QueryMind.integrations.llmservice import AnthropicLlmService, OpenAILlmService
@@ -356,7 +360,10 @@ def build_runtime_from_env(
         else evaluation_mode
     )
     query_plan_mode = QueryPlanMode.DISABLED
-    if resolved_mode == EvaluationMode.S2_AGENT_WITH_PLAN:
+    if resolved_mode in {
+        EvaluationMode.S2_AGENT_WITH_PLAN,
+        EvaluationMode.S5_SEMANTIC_CONTRACT_AGENT,
+    }:
         query_plan_mode = QueryPlanMode.ALWAYS
     elif resolved_mode in {
         EvaluationMode.S3_ADAPTIVE_AGENT,
@@ -366,6 +373,11 @@ def build_runtime_from_env(
     structured_failure_recovery = resolved_mode == EvaluationMode.S4_REVIEWED_AGENT
     sql_review_mode = (
         "high_risk" if resolved_mode == EvaluationMode.S4_REVIEWED_AGENT else "disabled"
+    )
+    semantic_contract_mode = (
+        SemanticContractMode.REQUIRED
+        if resolved_mode == EvaluationMode.S5_SEMANTIC_CONTRACT_AGENT
+        else SemanticContractMode.DISABLED
     )
     require_query_plan = query_plan_mode != QueryPlanMode.DISABLED
     agent_temperature = resolve_agent_temperature()
@@ -377,6 +389,21 @@ def build_runtime_from_env(
         neo4j_config=neo4j_config,
         mem0_config=mem0_config,
     )
+    semantic_contract_catalog = None
+    if semantic_contract_mode != SemanticContractMode.DISABLED:
+        contract_path_value = os.getenv("EVAL_SEMANTIC_CONTRACT_PATH", "").strip()
+        if not contract_path_value:
+            raise ValueError(
+                "EVAL_SEMANTIC_CONTRACT_PATH is required for S5 evaluation"
+            )
+        contract_path = Path(contract_path_value).expanduser()
+        if not contract_path.is_absolute():
+            contract_path = (REPO_ROOT / contract_path).resolve()
+        semantic_contract_catalog = load_semantic_contract_catalog(contract_path)
+        if semantic_contract_catalog.data_source_id != database_id:
+            raise ValueError(
+                "Semantic contract data_source_id does not match EVAL_DATABASE_ID"
+            )
 
     schema_extractor = None
 
@@ -451,6 +478,7 @@ def build_runtime_from_env(
         schema_memory=schema_memory,
         schema_sync_mode=schema_sync_mode,
         evaluation_mode=resolved_mode,
+        semantic_contract_catalog=semantic_contract_catalog,
         allow_write_sql=os.getenv("EVAL_ALLOW_WRITE_SQL", "false").lower() == "true",
     )
     runtime.agent_config.max_tool_iterations = max_tool_iterations
@@ -463,6 +491,7 @@ def build_runtime_from_env(
         os.getenv("EVAL_MAX_SAME_FAILURE_RETRIES", "2")
     )
     runtime.agent_config.sql_review_mode = sql_review_mode
+    runtime.agent_config.semantic_contract_mode = semantic_contract_mode
     runtime.agent_config.temperature = agent_temperature
     return runtime
 

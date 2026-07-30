@@ -208,6 +208,36 @@ def test_enterprise_metrics_and_failure_filter_are_exported(tmp_path: Path) -> N
     assert "Recovered / Secondary Signals" in rendered
 
 
+def test_accuracy_uses_all_cases_and_answer_precision_uses_executed_cases() -> None:
+    correct = _make_result(
+        test_case_id="case-correct",
+        passed=True,
+        agent_success=True,
+        score=1.0,
+        execution_time_ms=100.0,
+    )
+    correct.metadata.update(
+        {
+            "agent_sql_execution_success": True,
+            "verified_result_correct": True,
+            "business_result_correct": True,
+        }
+    )
+    abstained = _make_result(
+        test_case_id="case-abstained",
+        passed=False,
+        agent_success=False,
+        score=0.0,
+        execution_time_ms=100.0,
+    )
+    report = EvaluationReport(dataset_name="coverage", results=[correct, abstained])
+
+    assert report.result_correct_rate() == 0.5
+    assert report.business_result_correct_rate() == 0.5
+    assert report.automatic_answer_coverage() == 0.5
+    assert report.automatic_answer_precision() == 1.0
+
+
 def test_detailed_markdown_explains_accuracy_sql_and_failure(tmp_path: Path) -> None:
     result = _make_result(
         test_case_id="case-detail",

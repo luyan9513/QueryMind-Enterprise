@@ -2,6 +2,34 @@
 
 This file tracks changes maintained in `luyan9513/QueryMind-Enterprise` on top of the upstream QueryMind project.
 
+## Unreleased v0.7
+
+### Added
+
+- Versioned data-source semantic-contract catalogs with owner, status, metric formula, tables, fields, grain, time field, filters, and aliases.
+- Contract candidates in Schema Retrieve, version-bound citations in Query Plan, and SQL AST validation before execution.
+- S5 isolated evaluation mode, semantic coverage/pass/rejection metrics, and S0-S5 comparison support.
+- An AdventureWorks 1.0.0 catalog with 14 approved reusable metrics and a database-neutral template.
+
+### Changed
+
+- Overall strict/business accuracy now uses every dataset case as the denominator; abstentions are not silently removed.
+- Output aliases are advisory, while metric tables, fields, formulas, and required filters remain enforceable.
+- Contract matching returns candidates; uncovered metrics continue through existing governance rather than failing solely because a catalog is incomplete.
+
+### Verified
+
+- `192 passed, 1 warning`; focused Ruff and whitespace checks passed.
+- Final real-model smoke run passed 3/3.
+- Final 24-case S5: 58.33% strict, 66.67% business, 87.50% coverage, 76.19% executed-answer business precision, 20.83% wrong executed, P95 33.92 seconds.
+- S0-S5 comparison checker reported `comparable=true`.
+
+### Limits
+
+- Results cover one AdventureWorks run and are not a cross-database or production guarantee.
+- Five of 24 questions still executed incorrect results; metric contracts do not yet fully constrain dimensions, joins, ordering, output grain, or conditional aggregate variants.
+- Normal chat keeps semantic contracts disabled until a data source is explicitly configured and admitted.
+
 ## Unreleased v0.4
 
 ### Added

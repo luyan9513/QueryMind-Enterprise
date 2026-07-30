@@ -51,6 +51,7 @@ from .failure_recovery import (
     build_failure_recovery_prompt,
 )
 from .query_plan import QueryPlanMode, build_schema_evidence
+from .semantic_contract import SemanticContractMode
 from .sql_review import SqlReviewMode
 
 logger = logging.getLogger(__name__)
@@ -123,6 +124,17 @@ ordering, limit, and exact output shape. If the reviewer says revise, change the
 plan or SQL and review the new exact SQL again. If it says clarify, do not guess.
 Low-risk SQL may be exempt; the runtime makes the final decision.
 """.strip()
+_SEMANTIC_CONTRACT_PROMPT = """
+## Data-source semantic contracts
+
+Schema retrieval may return approved metric contracts owned by this data source.
+Treat them as candidates: cite only the contracts that actually define the
+requested metric, together with the catalog version. Use one accepted metric
+expression exactly and include its required tables and columns. Prefer the
+declared output aliases, but user-facing aliases may differ. A missing candidate
+does not prove that the question is ambiguous; continue with schema-grounded
+planning unless the business meaning itself is unclear.
+""".strip()
 
 
 def _normalize_sql_text(sql: str) -> str:
@@ -149,7 +161,8 @@ def _metadata_recovery_tools(tool_schemas: List[ToolSchema]) -> List[ToolSchema]
 def _is_query_plan_rejection(result: ToolResult) -> bool:
     return (
         not result.success
-        and str(result.metadata.get("rejection_stage") or "") == "planning"
+        and str(result.metadata.get("rejection_stage") or "")
+        in {"planning", "semantic_contract"}
     )
 
 
@@ -1421,6 +1434,13 @@ class Agent:
                             result.metadata["sql_review_routing"] = dict(
                                 sql_review_routing
                             )
+                        semantic_contract_validation = context.metadata.get(
+                            "semantic_contract_validation"
+                        )
+                        if isinstance(semantic_contract_validation, dict):
+                            result.metadata["semantic_contract_validation"] = dict(
+                                semantic_contract_validation
+                            )
 
                     if _is_rejected_metadata_sql(tool_call, result):
                         metadata_query_rejections += 1
@@ -1520,6 +1540,16 @@ class Agent:
                             result.metadata.update(live_schema_snapshot)
                             context.metadata.update(live_schema_snapshot)
                             request_metadata.update(live_schema_snapshot)
+                            semantic_contracts = result.metadata.get(
+                                "semantic_contracts"
+                            )
+                            if isinstance(semantic_contracts, dict):
+                                context.metadata["semantic_contracts"] = dict(
+                                    semantic_contracts
+                                )
+                                request_metadata["semantic_contracts"] = dict(
+                                    semantic_contracts
+                                )
                             context.metadata.pop("sql_intent_review", None)
                             request_metadata.pop("sql_intent_review", None)
                     if tool_call.name == "submit_query_plan":
@@ -1885,6 +1915,8 @@ You can:
         )
         query_plan_mode = self.config.effective_query_plan_mode()
         merged_metadata["query_plan_mode"] = query_plan_mode.value
+        semantic_contract_mode = self.config.effective_semantic_contract_mode()
+        merged_metadata["semantic_contract_mode"] = semantic_contract_mode.value
         sql_review_mode = self.config.effective_sql_review_mode()
         merged_metadata["sql_review_mode"] = sql_review_mode.value
         visible_tool_schemas = _apply_sql_review_tool_gate(
@@ -1916,6 +1948,12 @@ You can:
             system_prompt = "\n\n".join(
                 part
                 for part in [system_prompt or "", _SQL_REVIEW_PROMPT]
+                if part
+            )
+        if semantic_contract_mode != SemanticContractMode.DISABLED:
+            system_prompt = "\n\n".join(
+                part
+                for part in [system_prompt or "", _SEMANTIC_CONTRACT_PROMPT]
                 if part
             )
 

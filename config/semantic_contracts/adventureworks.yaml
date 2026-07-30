@@ -1,0 +1,219 @@
+data_source_id: adventureworks
+version: "1.0.0"
+description: AdventureWorks metric catalog used to validate the generic semantic-contract engine.
+
+metrics:
+  - id: sales.order_total
+    name: 销售订单总金额
+    aliases: [累计订单金额, 订单总金额, 总金额, 销售总额, 每个月的销售额, 订单金额]
+    description: 销售订单金额使用订单头 TotalDue，包含该数据源已经计入 TotalDue 的税费和运费。
+    status: approved
+    owner: sales-analytics
+    source_tables: [sales.salesorderheader]
+    required_columns: [sales.salesorderheader.totaldue]
+    accepted_expressions: [SUM(totaldue)]
+    output_alias: order_total
+    accepted_output_aliases: [销售总额, 订单总金额, 总金额]
+    base_grain: one sales order
+    default_time_column: sales.salesorderheader.orderdate
+
+  - id: sales.order_count
+    name: 销售订单数
+    aliases: [订单数, 多少笔]
+    description: 一张销售订单头记录计为一笔订单。
+    status: approved
+    owner: sales-analytics
+    source_tables: [sales.salesorderheader]
+    required_columns: []
+    accepted_expressions: [COUNT(*)]
+    output_alias: order_count
+    accepted_output_aliases: [订单数]
+    base_grain: one sales order
+    default_time_column: sales.salesorderheader.orderdate
+
+  - id: sales.line_revenue
+    name: 销售收入
+    aliases: [商品销售收入, 各商品大类的销售收入]
+    description: 商品行收入为数量乘单价，再扣除行折扣；不使用订单头 TotalDue。
+    status: approved
+    owner: sales-analytics
+    source_tables: [sales.salesorderdetail]
+    required_columns:
+      - sales.salesorderdetail.orderqty
+      - sales.salesorderdetail.unitprice
+      - sales.salesorderdetail.unitpricediscount
+    accepted_expressions:
+      - SUM(orderqty * unitprice * (1 - unitpricediscount))
+    output_alias: revenue
+    accepted_output_aliases: [销售收入, 商品销售收入]
+    base_grain: one sales order line
+
+  - id: sales.quantity_sold
+    name: 商品销售数量
+    aliases: [销量, 销售数量]
+    description: 商品销量为销售明细 OrderQty 的合计。
+    status: approved
+    owner: sales-analytics
+    source_tables: [sales.salesorderdetail]
+    required_columns: [sales.salesorderdetail.orderqty]
+    accepted_expressions: [SUM(orderqty)]
+    output_alias: quantity_sold
+    accepted_output_aliases: [销量, 销售数量]
+    base_grain: one sales order line
+
+  - id: sales.distinct_ordering_customers
+    name: 下过订单的不同客户数
+    aliases: [不同客户, 不同客户下过订单]
+    description: 对销售订单头 CustomerID 去重计数。
+    status: approved
+    owner: customer-analytics
+    source_tables: [sales.salesorderheader]
+    required_columns: [sales.salesorderheader.customerid]
+    accepted_expressions: [COUNT(DISTINCT customerid)]
+    output_alias: customer_count
+    accepted_output_aliases: [不同客户数, 客户数]
+    base_grain: one customer
+
+  - id: sales.customer_count
+    name: 客户数量
+    aliases: [客户数, 按国家或地区统计客户数量]
+    description: 客户主表每一行计为一个客户，不额外去重。
+    status: approved
+    owner: customer-analytics
+    source_tables: [sales.customer]
+    required_columns: []
+    accepted_expressions: [COUNT(*)]
+    output_alias: customer_count
+    accepted_output_aliases: [客户数量, 客户数]
+    base_grain: one customer
+
+  - id: inventory.current_quantity
+    name: 当前库存总量
+    aliases: [当前库存, 库存总量, 当前库存总量]
+    description: 当前库存为 ProductInventory.Quantity 的合计。
+    status: approved
+    owner: inventory-analytics
+    source_tables: [production.productinventory]
+    required_columns: [production.productinventory.quantity]
+    accepted_expressions:
+      - SUM(quantity)
+      - COALESCE(SUM(quantity), 0)
+    output_alias: inventory_quantity
+    accepted_output_aliases: [当前库存, 库存总量]
+    base_grain: one product-location inventory record
+
+  - id: purchasing.purchase_order_total
+    name: 采购订单总金额
+    aliases: [供应商的采购订单总金额, 采购总金额]
+    description: 采购订单总金额为 SubTotal、TaxAmt 与 Freight 之和。
+    status: approved
+    owner: purchasing-analytics
+    source_tables: [purchasing.purchaseorderheader]
+    required_columns:
+      - purchasing.purchaseorderheader.subtotal
+      - purchasing.purchaseorderheader.taxamt
+      - purchasing.purchaseorderheader.freight
+    accepted_expressions: [SUM(subtotal + taxamt + freight)]
+    output_alias: purchase_total
+    accepted_output_aliases: [采购总金额, 采购订单总金额]
+    base_grain: one purchase order
+    default_time_column: purchasing.purchaseorderheader.orderdate
+
+  - id: purchasing.average_freight
+    name: 平均运费
+    aliases: [采购订单平均运费]
+    description: 采购订单头 Freight 的平均值。
+    status: approved
+    owner: purchasing-analytics
+    source_tables: [purchasing.purchaseorderheader]
+    required_columns: [purchasing.purchaseorderheader.freight]
+    accepted_expressions: [AVG(freight)]
+    output_alias: average_freight
+    accepted_output_aliases: [平均运费]
+    base_grain: one purchase order
+
+  - id: purchasing.average_lead_days
+    name: 平均采购交付天数
+    aliases: [平均需要多少天, 从下单到发货平均]
+    description: 已发货采购订单的 ShipDate 日期减 OrderDate 日期后取平均。
+    status: approved
+    owner: purchasing-analytics
+    source_tables: [purchasing.purchaseorderheader]
+    required_columns:
+      - purchasing.purchaseorderheader.shipdate
+      - purchasing.purchaseorderheader.orderdate
+    accepted_expressions:
+      - AVG(CAST(shipdate AS DATE) - CAST(orderdate AS DATE))
+    output_alias: average_lead_days
+    accepted_output_aliases: [平均交付天数]
+    base_grain: one shipped purchase order
+    required_filter_columns: [purchasing.purchaseorderheader.shipdate]
+
+  - id: hr.active_department_employee_count
+    name: 部门在职员工数
+    aliases: [每个部门有多少在职员工, 部门在职人数]
+    description: 当前部门任职记录按 BusinessEntityID 去重，并要求任职未结束且员工仍在职。
+    status: approved
+    owner: hr-analytics
+    source_tables:
+      - humanresources.employeedepartmenthistory
+      - humanresources.employee
+    required_columns:
+      - humanresources.employeedepartmenthistory.businessentityid
+      - humanresources.employeedepartmenthistory.enddate
+      - humanresources.employee.currentflag
+    accepted_expressions: [COUNT(DISTINCT businessentityid)]
+    output_alias: employee_count
+    accepted_output_aliases: [在职员工数, 在职人数]
+    base_grain: one active employee
+    required_filter_columns:
+      - humanresources.employeedepartmenthistory.enddate
+      - humanresources.employee.currentflag
+
+  - id: hr.current_job_employee_count
+    name: 当前职位员工数
+    aliases: [按职位统计当前员工人数, 当前员工人数]
+    description: Employee 当前记录中 CurrentFlag 为真的员工行数。
+    status: approved
+    owner: hr-analytics
+    source_tables: [humanresources.employee]
+    required_columns:
+      - humanresources.employee.currentflag
+    accepted_expressions: [COUNT(*)]
+    output_alias: employee_count
+    accepted_output_aliases: [员工人数]
+    base_grain: one current employee
+    required_filter_columns: [humanresources.employee.currentflag]
+
+  - id: product.estimated_cost
+    name: 估算成本
+    aliases: [商品估算成本]
+    description: 商品估算成本为销售数量乘产品标准成本后求和。
+    status: approved
+    owner: product-analytics
+    source_tables: [sales.salesorderdetail, production.product]
+    required_columns:
+      - sales.salesorderdetail.orderqty
+      - production.product.standardcost
+    accepted_expressions: [SUM(orderqty * standardcost)]
+    output_alias: estimated_cost
+    accepted_output_aliases: [估算成本]
+    base_grain: one sales order line
+
+  - id: product.estimated_margin
+    name: 估算毛利
+    aliases: [商品估算毛利]
+    description: 行净收入减销售数量乘标准成本后求和。
+    status: approved
+    owner: product-analytics
+    source_tables: [sales.salesorderdetail, production.product]
+    required_columns:
+      - sales.salesorderdetail.orderqty
+      - sales.salesorderdetail.unitprice
+      - sales.salesorderdetail.unitpricediscount
+      - production.product.standardcost
+    accepted_expressions:
+      - SUM(orderqty * (unitprice * (1 - unitpricediscount) - standardcost))
+    output_alias: estimated_margin
+    accepted_output_aliases: [估算毛利]
+    base_grain: one sales order line

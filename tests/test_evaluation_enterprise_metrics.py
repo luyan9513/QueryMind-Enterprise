@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from QueryMind.core.evaluation import (  # noqa: E402
     AgentResult,
     EvaluationDataset,
+    EvaluationReport,
     EvaluationResult,
     ExpectedSqlContract,
     ExpectedSchema,
@@ -356,6 +357,117 @@ def test_failure_attribution_recognizes_judge_provider_failure() -> None:
     primary, _ = classify_failure(result)
 
     assert primary == "provider_failure"
+
+
+def test_failure_attribution_recognizes_semantic_contract_block() -> None:
+    result = EvaluationResult(
+        test_case=_test_case(),
+        agent_result=_agent_result(
+            [
+                ToolInvocationRecord(
+                    tool_call_id="sql-1",
+                    tool_name="run_sql",
+                    success=False,
+                    metadata={"rejection_stage": "semantic_contract"},
+                )
+            ]
+        ),
+        passed=False,
+        issue_tags=["missing_sql"],
+    )
+
+    primary, _ = classify_failure(result)
+
+    assert primary == "semantic_contract_failure"
+
+
+def test_failure_attribution_does_not_treat_offline_replay_as_agent_success() -> None:
+    result = EvaluationResult(
+        test_case=_test_case(),
+        agent_result=_agent_result(
+            [
+                ToolInvocationRecord(
+                    tool_call_id="plan-1",
+                    tool_name="submit_query_plan",
+                    success=False,
+                    metadata={
+                        "query_plan_issues": [
+                            "contract_output_alias_missing_from_plan:sales.revenue"
+                        ]
+                    },
+                )
+            ]
+        ),
+        passed=False,
+        issue_tags=["missing_sql"],
+        metadata={
+            "result_correct": True,
+            "verified_result_correct": False,
+        },
+    )
+
+    primary, _ = classify_failure(result)
+
+    assert primary == "semantic_contract_failure"
+
+
+def test_report_pairs_answer_precision_with_contract_coverage() -> None:
+    contract_trace = [
+        ToolInvocationRecord(
+            tool_call_id="schema-1",
+            tool_name="schema_retrieve",
+            metadata={
+                "semantic_contracts": {
+                    "matched_metric_ids": ["sales.order_total"]
+                }
+            },
+        ),
+        ToolInvocationRecord(
+            tool_call_id="plan-1",
+            tool_name="submit_query_plan",
+            metadata={
+                "query_plan": {
+                    "semantic_contract_ids": ["sales.order_total"]
+                }
+            },
+        ),
+        ToolInvocationRecord(
+            tool_call_id="sql-1",
+            tool_name="run_sql",
+            success=True,
+            metadata={
+                "semantic_contract_validation": {"passed": True}
+            },
+        ),
+    ]
+    answered = EvaluationResult(
+        test_case=_test_case(),
+        agent_result=_agent_result(contract_trace),
+        passed=True,
+        metadata={
+            "agent_sql_execution_success": True,
+            "business_result_correct": True,
+        },
+    )
+    abstained = EvaluationResult(
+        test_case=_test_case().model_copy(update={"id": "enterprise-2"}),
+        agent_result=_agent_result(),
+        passed=False,
+        metadata={
+            "agent_sql_execution_success": False,
+            "business_result_correct": False,
+        },
+    )
+    report = EvaluationReport(dataset_name="demo", results=[answered, abstained])
+
+    assert report.automatic_answer_coverage() == 0.5
+    assert report.automatic_answer_precision() == 1.0
+    assert report.semantic_contract_metrics() == {
+        "matched_cases": 1,
+        "cited_cases": 1,
+        "validation_passed_attempts": 1,
+        "validation_rejected_attempts": 0,
+    }
 
 
 def test_failure_attribution_prioritizes_query_contract_failure() -> None:

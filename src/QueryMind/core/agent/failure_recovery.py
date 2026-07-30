@@ -118,6 +118,14 @@ def classify_tool_failure(tool_call: ToolCall, result: ToolResult) -> FailureDec
             reason=code or stage,
             allowed_tools=["schema_retrieve", "submit_query_plan"],
         )
+    if stage == "semantic_contract":
+        return FailureDecision(
+            category=FailureCategory.QUERY_PLANNING,
+            action=RecoveryAction.REPLAN,
+            fingerprint=fingerprint,
+            reason=code or stage,
+            allowed_tools=["schema_retrieve", "submit_query_plan"],
+        )
     if stage == "semantic_review":
         return FailureDecision(
             category=FailureCategory.SEMANTIC_REVIEW,

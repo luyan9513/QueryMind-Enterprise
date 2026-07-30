@@ -10,6 +10,10 @@ from pydantic import BaseModel, Field
 
 from .._compat import StrEnum
 from .query_plan import QueryPlanMode, parse_query_plan_mode
+from .semantic_contract import (
+    SemanticContractMode,
+    parse_semantic_contract_mode,
+)
 from .sql_review import SqlReviewMode, parse_sql_review_mode
 
 if TYPE_CHECKING:
@@ -174,6 +178,10 @@ class AgentConfig(BaseModel):
         default=SqlReviewMode.DISABLED,
         description="Independent SQL semantic review: disabled, high_risk, or always",
     )
+    semantic_contract_mode: SemanticContractMode = Field(
+        default=SemanticContractMode.DISABLED,
+        description="Data-source semantic contracts: disabled, advisory, or required",
+    )
     max_tokens: Optional[int] = Field(default=None, gt=0)
     ui_features: UiFeatures = Field(default_factory=UiFeatures)
     audit_config: AuditConfig = Field(default_factory=AuditConfig)
@@ -205,3 +213,6 @@ class AgentConfig(BaseModel):
 
     def effective_sql_review_mode(self) -> SqlReviewMode:
         return parse_sql_review_mode(self.sql_review_mode)
+
+    def effective_semantic_contract_mode(self) -> SemanticContractMode:
+        return parse_semantic_contract_mode(self.semantic_contract_mode)

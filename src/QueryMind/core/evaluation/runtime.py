@@ -16,6 +16,7 @@ from QueryMind.core.agent import (
     Agent,
     AgentConfig,
     QueryPlanMode,
+    SemanticContractCatalog,
     SqlReviewMode,
     build_schema_governance_stack,
     build_sql_governance_stack,
@@ -233,6 +234,7 @@ class EvaluationRuntime:
         )
     )
     schema_management_service: Any = None
+    semantic_contract_catalog: SemanticContractCatalog | None = None
     observability_provider: Any = None
     _initialized: bool = field(default=False, init=False, repr=False)
     schema_init_result: Any = field(default=None, init=False, repr=False)
@@ -302,6 +304,9 @@ class EvaluationRuntime:
             require_query_plan=self.agent_config.require_query_plan,
             query_plan_mode=self.agent_config.effective_query_plan_mode(),
             sql_review_mode=self.agent_config.effective_sql_review_mode(),
+            semantic_contract_mode=(
+                self.agent_config.effective_semantic_contract_mode()
+            ),
         )
         registry.register_local_tool(
             RunSqlTool(
@@ -312,12 +317,25 @@ class EvaluationRuntime:
             ),
             [],
         )
-        registry.register_local_tool(SchemaRetrieveTool(schema_memory=self.schema_memory), [])
+        registry.register_local_tool(
+            SchemaRetrieveTool(
+                schema_memory=self.schema_memory,
+                semantic_contract_catalog=self.semantic_contract_catalog,
+            ),
+            [],
+        )
         if (
             self.agent_config.effective_query_plan_mode()
             != QueryPlanMode.DISABLED
         ):
-            registry.register_local_tool(SubmitQueryPlanTool(), [])
+            registry.register_local_tool(
+                SubmitQueryPlanTool(
+                    semantic_contract_mode=(
+                        self.agent_config.effective_semantic_contract_mode()
+                    )
+                ),
+                [],
+            )
         if self.agent_config.effective_sql_review_mode() != SqlReviewMode.DISABLED:
             registry.register_local_tool(
                 ReviewSqlIntentTool(llm_service=self.agent_llm_service),

@@ -57,6 +57,17 @@ from .sql_review import (
     requires_sql_review,
     sql_fingerprint,
 )
+from .semantic_contract import (
+    SemanticContractCatalog,
+    SemanticContractCheck,
+    SemanticContractMode,
+    SemanticMetricContract,
+    format_semantic_contracts_for_llm,
+    load_semantic_contract_catalog,
+    parse_semantic_contract_mode,
+    validate_query_plan_semantic_contracts,
+    validate_sql_against_semantic_contracts,
+)
 
 __all__ = [
     "Agent",
@@ -102,4 +113,13 @@ __all__ = [
     "parse_sql_review_mode",
     "requires_sql_review",
     "sql_fingerprint",
+    "SemanticContractCatalog",
+    "SemanticContractCheck",
+    "SemanticContractMode",
+    "SemanticMetricContract",
+    "format_semantic_contracts_for_llm",
+    "load_semantic_contract_catalog",
+    "parse_semantic_contract_mode",
+    "validate_query_plan_semantic_contracts",
+    "validate_sql_against_semantic_contracts",
 ]

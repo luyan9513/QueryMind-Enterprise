@@ -1,0 +1,25 @@
+data_source_id: replace_with_database_id
+version: "1.0.0"
+description: Approved business metric definitions for one data source.
+
+metrics:
+  - id: sales.net_revenue
+    name: Net revenue
+    aliases: [revenue, net sales]
+    description: Sum of line quantity times net unit price after line discount.
+    status: approved
+    owner: finance
+    source_tables: [sales.order_lines]
+    required_columns:
+      - sales.order_lines.quantity
+      - sales.order_lines.unit_price
+      - sales.order_lines.discount_rate
+    accepted_expressions:
+      - SUM(quantity * unit_price * (1 - discount_rate))
+    output_alias: net_revenue
+    accepted_output_aliases: [revenue]
+    base_grain: one order line
+    default_time_column: sales.orders.order_date
+    required_filter_columns: []
+    notes:
+      - Replace every example identifier with the target data source definition.

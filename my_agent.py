@@ -26,6 +26,10 @@ STRUCTURED_FAILURE_RECOVERY = os.getenv(
 ).strip().lower() in {"1", "true", "yes", "on"}
 MAX_SAME_FAILURE_RETRIES = int(os.getenv("MAX_SAME_FAILURE_RETRIES", "2"))
 SQL_REVIEW_MODE_VALUE = os.getenv("SQL_REVIEW_MODE", "disabled")
+SEMANTIC_CONTRACT_MODE_VALUE = os.getenv(
+    "SEMANTIC_CONTRACT_MODE", "disabled"
+)
+SEMANTIC_CONTRACT_PATH_VALUE = os.getenv("SEMANTIC_CONTRACT_PATH", "")
 LEGACY_REQUIRE_QUERY_PLAN = os.getenv(
     "REQUIRE_QUERY_PLAN", "true"
 ).strip().lower() in {
@@ -39,10 +43,14 @@ QUERY_PLAN_MODE_VALUE = os.getenv("QUERY_PLAN_MODE")
 from QueryMind.core import Agent, AgentConfig, ToolRegistry  # noqa: E402
 from QueryMind.core.agent import (  # noqa: E402
     QueryPlanMode,
+    SemanticContractCatalog,
+    SemanticContractMode,
     SqlReviewMode,
     build_schema_governance_stack,
     build_sql_governance_stack,
+    load_semantic_contract_catalog,
     parse_query_plan_mode,
+    parse_semantic_contract_mode,
     parse_sql_review_mode,
 )
 from QueryMind.core.enhancer import (  # noqa: E402
@@ -104,6 +112,9 @@ QUERY_PLAN_MODE = parse_query_plan_mode(
     require_query_plan=LEGACY_REQUIRE_QUERY_PLAN,
 )
 SQL_REVIEW_MODE = parse_sql_review_mode(SQL_REVIEW_MODE_VALUE)
+SEMANTIC_CONTRACT_MODE = parse_semantic_contract_mode(
+    SEMANTIC_CONTRACT_MODE_VALUE
+)
 REQUIRE_QUERY_PLAN = QUERY_PLAN_MODE != QueryPlanMode.DISABLED
 from QueryMind.rls_registry import RLSToolRegistry  # noqa: E402
 
@@ -138,6 +149,19 @@ def resolve_agent_llm_settings() -> tuple[str, str | None, str | None, dict | No
     return model, api_key, base_url, extra_body
 
 
+def load_configured_semantic_contract_catalog() -> SemanticContractCatalog | None:
+    if SEMANTIC_CONTRACT_MODE == SemanticContractMode.DISABLED:
+        return None
+    if not SEMANTIC_CONTRACT_PATH_VALUE.strip():
+        raise ValueError(
+            "SEMANTIC_CONTRACT_PATH is required when semantic contracts are enabled"
+        )
+    path = Path(SEMANTIC_CONTRACT_PATH_VALUE).expanduser()
+    if not path.is_absolute():
+        path = SCRIPT_DIR / path
+    return load_semantic_contract_catalog(path)
+
+
 class SimpleUserResolver(UserResolver):
     async def resolve_user(self, request_context: RequestContext) -> User:
         return User(
@@ -154,6 +178,8 @@ def register_tools(
     *,
     query_plan_mode: QueryPlanMode,
     sql_review_mode: SqlReviewMode,
+    semantic_contract_mode: SemanticContractMode,
+    semantic_contract_catalog: SemanticContractCatalog | None,
     llm_service,
 ) -> None:
     results_file_system = LocalFileSystem(working_directory=str(QUERY_RESULTS_DIR))
@@ -172,10 +198,23 @@ def register_tools(
             ),
             ["user", "admin"],
         ),
-        (SchemaRetrieveTool(schema_memory=schema_memory), ["user", "admin"]),
+        (
+            SchemaRetrieveTool(
+                schema_memory=schema_memory,
+                semantic_contract_catalog=semantic_contract_catalog,
+            ),
+            ["user", "admin"],
+        ),
     ]
     if query_plan_mode != QueryPlanMode.DISABLED:
-        core_tools.append((SubmitQueryPlanTool(), ["user", "admin"]))
+        core_tools.append(
+            (
+                SubmitQueryPlanTool(
+                    semantic_contract_mode=semantic_contract_mode
+                ),
+                ["user", "admin"],
+            )
+        )
     if sql_review_mode != SqlReviewMode.DISABLED:
         core_tools.append(
             (ReviewSqlIntentTool(llm_service=llm_service), ["user", "admin"])
@@ -229,6 +268,7 @@ def build_agent() -> Agent:
         neo4j_config=Neo4jConfig.from_env(),
         mem0_config=Mem0VectorConfig.from_env(),
     )
+    semantic_contract_catalog = load_configured_semantic_contract_catalog()
 
     schema_management_service = Neo4jMem0SchemaManagementService(
         schema_memory=schema_memory,
@@ -288,12 +328,15 @@ def build_agent() -> Agent:
         require_query_plan=REQUIRE_QUERY_PLAN,
         query_plan_mode=QUERY_PLAN_MODE,
         sql_review_mode=SQL_REVIEW_MODE,
+        semantic_contract_mode=SEMANTIC_CONTRACT_MODE,
     )
     register_tools(
         registry,
         schema_memory,
         query_plan_mode=QUERY_PLAN_MODE,
         sql_review_mode=SQL_REVIEW_MODE,
+        semantic_contract_mode=SEMANTIC_CONTRACT_MODE,
+        semantic_contract_catalog=semantic_contract_catalog,
         llm_service=llm_service,
     )
 
@@ -307,6 +350,7 @@ def build_agent() -> Agent:
         structured_failure_recovery=STRUCTURED_FAILURE_RECOVERY,
         max_same_failure_retries=MAX_SAME_FAILURE_RETRIES,
         sql_review_mode=SQL_REVIEW_MODE,
+        semantic_contract_mode=SEMANTIC_CONTRACT_MODE,
         schema_search_default_threshold=0.4,
     )
 

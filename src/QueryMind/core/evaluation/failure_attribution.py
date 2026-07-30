@@ -45,8 +45,13 @@ def classify_failure(result: EvaluationResult) -> tuple[str, List[str]]:
         stage = str(record.metadata.get("rejection_stage") or "").lower()
         if stage == "permission":
             categories.append("permission_failure")
+        elif stage == "semantic_contract":
+            categories.append("semantic_contract_failure")
         elif stage:
             categories.append("governance_rejection")
+        query_plan_issues = record.metadata.get("query_plan_issues") or []
+        if any("contract_" in str(issue) for issue in query_plan_issues):
+            categories.append("semantic_contract_failure")
 
     combined_tool_text = "\n".join(tool_texts)
     if any(marker in combined_tool_text for marker in _PERMISSION_MARKERS):
@@ -66,7 +71,11 @@ def classify_failure(result: EvaluationResult) -> tuple[str, List[str]]:
         result.agent_artifact is not None and not result.agent_artifact.success
     ):
         categories.append("sql_execution_failure")
-    if result.metadata.get("result_correct") is False and result.agent_artifact is not None:
+    verified_result_correct = result.metadata.get(
+        "verified_result_correct",
+        result.metadata.get("result_correct"),
+    )
+    if verified_result_correct is False and result.agent_artifact is not None:
         categories.append("result_mismatch")
     if issue_tags & {"final_answer_absent", "final_answer_fragment_mismatch"}:
         categories.append("answer_format_failure")
@@ -76,7 +85,7 @@ def classify_failure(result: EvaluationResult) -> tuple[str, List[str]]:
 
     deduped = list(dict.fromkeys(categories))
     if (
-        result.metadata.get("result_correct") is True
+        verified_result_correct is True
         and result.metadata.get("sql_contract_passed") is not False
     ):
         return "success", deduped
@@ -85,6 +94,7 @@ def classify_failure(result: EvaluationResult) -> tuple[str, List[str]]:
         "dataset_failure",
         "provider_failure",
         "permission_failure",
+        "semantic_contract_failure",
         "sql_generation_failure",
         "query_contract_failure",
         "sql_execution_failure",

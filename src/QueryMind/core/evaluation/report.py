@@ -27,6 +27,7 @@ _FAILURE_EXPLANATIONS = {
     "dataset_failure": "参考 SQL 或评测数据本身不可执行，需要先修复评测集。",
     "provider_failure": "模型服务发生超时、限流或连接异常，结果不能代表 SQL 能力。",
     "permission_failure": "查询被用户权限或行级权限规则拦截。",
+    "semantic_contract_failure": "SQL 未满足已引用指标的公式、来源表、字段或必需过滤，因此没有自动执行。",
     "sql_generation_failure": "Agent 没有产出可供评测的 SQL。",
     "query_contract_failure": "SQL 虽可能执行，但违反了题目声明的结构或业务口径约束。",
     "sql_execution_failure": "SQL 语法、字段、表或数据库执行过程出错。",
@@ -89,6 +90,7 @@ def _case_improvement_suggestion(result: EvaluationResult) -> str:
         "sql_execution_failure": "先根据数据库错误修正表名、字段名、函数或方言，再复核业务语义。",
         "sql_generation_failure": "减少无效工具循环；证据不足时应向用户澄清，而不是猜测 SQL。",
         "permission_failure": "核对用户组、RLS 范围和允许访问的业务域，不应绕过权限。",
+        "semantic_contract_failure": "补齐或修订该数据源的指标合同；没有负责人确认的口径时应澄清，不要让模型猜。",
         "provider_failure": "单独重试该样例并记录服务状态，不把云服务异常混入准确率结论。",
         "governance_rejection": "按照治理层返回的原因做最小修复，避免重复提交同类危险或元数据 SQL。",
         "answer_format_failure": "保持已验证 SQL 不变，只修正最终回答的字段说明和表达格式。",
@@ -152,13 +154,8 @@ class EvaluationReport(BaseModel):
         ) / len(self.results)
 
     def result_correct_rate(self) -> float:
-        measured = [
-            item
-            for item in self.results
-            if "verified_result_correct" in (item.metadata or {})
-            or "result_correct" in (item.metadata or {})
-        ]
-        if not measured:
+        """Strict accuracy over every dataset case; abstentions count as incorrect."""
+        if not self.results:
             return 0.0
         return sum(
             bool(
@@ -167,20 +164,17 @@ class EvaluationReport(BaseModel):
                     item.metadata.get("result_correct"),
                 )
             )
-            for item in measured
-        ) / len(measured)
+            for item in self.results
+        ) / len(self.results)
 
     def business_result_correct_rate(self) -> float:
-        measured = [
-            item
-            for item in self.results
-            if "business_result_correct" in (item.metadata or {})
-        ]
-        if not measured:
+        """Business accuracy over every dataset case; abstentions count as incorrect."""
+        if not self.results:
             return 0.0
         return sum(
-            bool(item.metadata.get("business_result_correct")) for item in measured
-        ) / len(measured)
+            bool(item.metadata.get("business_result_correct"))
+            for item in self.results
+        ) / len(self.results)
 
     def sql_contract_pass_rate(self) -> float:
         measured = [
@@ -307,6 +301,39 @@ class EvaluationReport(BaseModel):
                     counter[action] += 1
         return dict(sorted(counter.items()))
 
+    def semantic_contract_metrics(self) -> Dict[str, Any]:
+        matched_cases = 0
+        cited_cases = 0
+        validation_passed = 0
+        validation_rejected = 0
+        for item in self.results:
+            matched = False
+            cited = False
+            for call in item.agent_result.get_tool_calls("schema_retrieve"):
+                snapshot = call.metadata.get("semantic_contracts")
+                if isinstance(snapshot, dict) and snapshot.get("matched_metric_ids"):
+                    matched = True
+            for call in item.agent_result.get_tool_calls("submit_query_plan"):
+                plan = call.metadata.get("query_plan")
+                if isinstance(plan, dict) and plan.get("semantic_contract_ids"):
+                    cited = True
+            for call in item.agent_result.get_tool_calls("run_sql"):
+                validation = call.metadata.get("semantic_contract_validation")
+                if not isinstance(validation, dict):
+                    continue
+                if validation.get("passed"):
+                    validation_passed += 1
+                else:
+                    validation_rejected += 1
+            matched_cases += int(matched)
+            cited_cases += int(cited)
+        return {
+            "matched_cases": matched_cases,
+            "cited_cases": cited_cases,
+            "validation_passed_attempts": validation_passed,
+            "validation_rejected_attempts": validation_rejected,
+        }
+
     def recovery_yield(self) -> Dict[str, Any]:
         eligible = [
             item
@@ -370,6 +397,17 @@ class EvaluationReport(BaseModel):
             bool(item.metadata.get("agent_sql_execution_success"))
             for item in self.results
         ) / len(self.results)
+
+    def automatic_answer_precision(self, *, business: bool = True) -> float | None:
+        answered = [
+            item
+            for item in self.results
+            if bool(item.metadata.get("agent_sql_execution_success"))
+        ]
+        if not answered:
+            return None
+        key = "business_result_correct" if business else "verified_result_correct"
+        return sum(bool(item.metadata.get(key)) for item in answered) / len(answered)
 
     def accuracy_intervals(self) -> Dict[str, Dict[str, Any]]:
         total = len(self.results)
@@ -566,10 +604,12 @@ class EvaluationReport(BaseModel):
             "failure_recovery_action_totals": (
                 self.failure_recovery_action_totals()
             ),
+            "semantic_contract_metrics": self.semantic_contract_metrics(),
             "p50_agent_execution_time_ms": self.p50_agent_execution_time(),
             "p95_agent_execution_time_ms": self.p95_agent_execution_time(),
             "max_agent_execution_time_ms": self.max_agent_execution_time(),
             "automatic_answer_coverage": self.automatic_answer_coverage(),
+            "automatic_answer_precision": self.automatic_answer_precision(),
             "wrong_executed_rate": self.wrong_executed_rate(),
             "recovery_yield": self.recovery_yield(),
             "false_block_rate": self.false_block_rate(),
@@ -839,6 +879,11 @@ class EvaluationReport(BaseModel):
         consistency_label = (
             f"{float(consistency):.2%}" if consistency is not None else "没有重复运行"
         )
+        answer_precision = self.automatic_answer_precision()
+        answer_precision_label = (
+            f"{answer_precision:.2%}" if answer_precision is not None else "没有自动执行"
+        )
+        contract_metrics = self.semantic_contract_metrics()
         lines = [
             f"# 系统评测明细：{self.dataset_name}",
             "",
@@ -861,7 +906,13 @@ class EvaluationReport(BaseModel):
             f"- 平均 / P95 Agent 延迟：{self.average_execution_time() / 1000:.2f}s / {self.p95_agent_execution_time() / 1000:.2f}s",
             f"- P50 / 最大 Agent 延迟：{self.p50_agent_execution_time() / 1000:.2f}s / {self.max_agent_execution_time() / 1000:.2f}s",
             f"- 自动回答覆盖率：{self.automatic_answer_coverage():.2%}",
+            f"- 已自动回答业务准确率：{answer_precision_label}",
             f"- 错误但已执行比例：{self.wrong_executed_rate():.2%}",
+            "- 语义合同命中 / 引用题数："
+            f"{contract_metrics['matched_cases']} / {contract_metrics['cited_cases']}",
+            "- 语义合同放行 / 拒绝尝试："
+            f"{contract_metrics['validation_passed_attempts']} / "
+            f"{contract_metrics['validation_rejected_attempts']}",
             f"- 估算模型成本：{cost_label}",
             f"- 每个严格 / 业务正确答案成本：{strict_cost_label} / {business_cost_label}",
             f"- 同题重复运行一致率：{consistency_label}",
@@ -873,6 +924,7 @@ class EvaluationReport(BaseModel):
             "- SQL 契约：检查必要聚合、分组、过滤字段、输出列等结构，防止错误 SQL 被宽松 Judge 误判为正确。",
             "- 评测器事后 SQL 可执行率：评测器单独执行 Agent 最后尝试的 SQL；不代表 Agent 运行时放行并执行。",
             "- Agent 内部 SQL 执行成功率：至少一次 `run_sql` 真正通过计划、治理和权限检查并执行成功。",
+            "- 已自动回答业务准确率：只在真正执行的题中统计正确率，必须和覆盖率一起看，不能靠大量拒答单独美化。",
             "- Evaluator 通过率不是严格准确率；其中可能包含大模型 Judge 的判断，应结合上面三个确定性指标阅读。",
             "- 任何指标都只代表当前数据、当前问题集和当前模型配置，不能证明换一套数据后仍然 100% 正确。",
             "",
@@ -1426,6 +1478,9 @@ class ComparisonReport(BaseModel):
                     report.agent_sql_execution_success_rate()
                 ),
                 "automatic_answer_coverage": report.automatic_answer_coverage(),
+                "automatic_answer_precision": (
+                    report.automatic_answer_precision()
+                ),
                 "wrong_executed_rate": report.wrong_executed_rate(),
                 "first_sql_result_correct_rate": (
                     report.first_sql_result_correct_rate()
@@ -1443,6 +1498,7 @@ class ComparisonReport(BaseModel):
                 "failure_recovery_action_totals": (
                     report.failure_recovery_action_totals()
                 ),
+                "semantic_contract_metrics": report.semantic_contract_metrics(),
                 "recovery_yield": report.recovery_yield(),
                 "false_block_rate": report.false_block_rate(),
                 "plan_acceptance_precision": report.plan_acceptance_precision(),
@@ -1548,17 +1604,20 @@ class ComparisonReport(BaseModel):
         lines.extend(
             [
                 "",
-                "| 模式 | 样本 | 严格准确率 | 业务准确率 | P50 / P95 延迟 | 错误但已执行 | 平均工具数 | 估算成本 |",
-                "|---|---:|---:|---:|---:|---:|---:|---:|",
+                "| 模式 | 样本 | 严格准确率 | 业务准确率 | 覆盖率 / 已回答准确率 | P50 / P95 延迟 | 错误但已执行 | 平均工具数 | 估算成本 |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
             ]
         )
         for label, summary in summaries.items():
             cost = summary["estimated_cost_usd"]
             cost_label = f"${cost:.6f}" if cost is not None else "未配置"
+            precision = summary["automatic_answer_precision"]
+            precision_label = f"{precision:.2%}" if precision is not None else "n/a"
             lines.append(
                 f"| {label} | {summary['cases']} | "
                 f"{summary['strict_accuracy']:.2%} | "
                 f"{summary['business_accuracy']:.2%} | "
+                f"{summary['automatic_answer_coverage']:.2%} / {precision_label} | "
                 f"{summary['p50_agent_execution_time_ms'] / 1000:.2f}s / "
                 f"{summary['p95_agent_execution_time_ms'] / 1000:.2f}s | "
                 f"{summary['wrong_executed_rate']:.2%} | "
