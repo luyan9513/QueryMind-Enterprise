@@ -16,6 +16,7 @@ from QueryMind.runtime_paths import load_repo_env, resolve_data_dir
 load_repo_env()
 
 CONVERSATIONS_DIR = resolve_data_dir("QUERYMIND_CONVERSATIONS_DIR", "conversations")
+AGENT_RUNS_DIR = resolve_data_dir("QUERYMIND_AGENT_RUNS_DIR", "agent_runs")
 QUERY_RESULTS_DIR = resolve_data_dir("QUERYMIND_QUERY_RESULTS_DIR", "query_results")
 MAX_TOOL_ITERATIONS = int(os.getenv("MAX_TOOL_ITERATIONS", "25"))
 AGENT_TEMPERATURE = float(os.getenv("AGENT_TEMPERATURE", "0.0"))
@@ -76,7 +77,10 @@ from QueryMind.integrations.agentmemory import (  # noqa: E402
 )
 from QueryMind.integrations.auditlogger import PostgresAuditLogger  # noqa: E402
 from QueryMind.integrations.llmservice import OpenAILlmService  # noqa: E402
-from QueryMind.integrations.local import FileSystemConversationStore  # noqa: E402
+from QueryMind.integrations.local import (  # noqa: E402
+    FileSystemAgentRunStore,
+    FileSystemConversationStore,
+)
 from QueryMind.integrations.observer import PrometheusObservabilityProvider  # noqa: E402
 from QueryMind.integrations.schemamemory import (  # noqa: E402
     Mem0VectorConfig,
@@ -354,7 +358,7 @@ def build_agent() -> Agent:
         schema_search_default_threshold=0.4,
     )
 
-    return Agent(
+    agent = Agent(
         llm_service=llm_service,
         tool_registry=registry,
         user_resolver=SimpleUserResolver(),
@@ -372,6 +376,8 @@ def build_agent() -> Agent:
         schema_governance_manager=schema_governance.manager,
         observability_provider=PrometheusObservabilityProvider(),
     )
+    agent.agent_run_store = FileSystemAgentRunStore(base_dir=str(AGENT_RUNS_DIR))
+    return agent
 
 
 def main() -> None:

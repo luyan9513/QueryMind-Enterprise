@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from ..base import ChatHandler
+from .agent_run_routes import register_agent_run_routes
 from .routes import register_chat_routes, register_metrics_routes, register_schema_routes
 
 import logging
@@ -148,6 +149,11 @@ class QueryMindFastAPIServer:
 
         # Register routes
         register_chat_routes(app, self.chat_handler, self.config)
+        register_agent_run_routes(
+            app,
+            self.agent,
+            getattr(self.agent, "agent_run_store", None),
+        )
         register_metrics_routes(app, self.agent, self.config)
         register_schema_routes(app, self.agent, self.config)
 

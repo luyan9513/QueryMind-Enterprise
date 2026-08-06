@@ -14,7 +14,8 @@ This fork is maintained by [luyan9513](https://github.com/luyan9513) as an enter
 - Read-only PostgreSQL PK/FK extraction through `pg_catalog`, including composite and cross-schema relationships.
 - Persistent LLM-generated conversation titles, automatic history refresh, workflow message storage, and graceful fallback.
 - A 24-case Chinese AdventureWorks business benchmark with deterministic full-result checks, Schema Recall, first-attempt metrics, failure attribution, trace redaction, and an interactive HTML report.
-- AdventureWorks validation across 68 tables and 456 fields, with 128 Python tests passing.
+- Database-scoped Schema Memory retrieval plus an independent Chinook benchmark and 12-metric catalog for second-source admission; the v0.9 development set has reached 50/100 cases.
+- AdventureWorks validation across 68 tables and 456 fields, plus an initialized 11-table Chinook source; the current formal test scope is `229 passed, 1 warning`.
 
 See [Portfolio Ownership and Evidence](docs/portfolio/ownership.md) for the upstream boundary, personal contributions, verification evidence, and roadmap.
 
@@ -302,7 +303,19 @@ The final S5 run completed the same frozen 24 questions under the same model and
 
 These are small-sample AdventureWorks results, not a cross-database guarantee. Normal chat keeps `SEMANTIC_CONTRACT_MODE=disabled`; every new data source needs its own catalog, frozen benchmark, and admission result. See [the v0.7 design and evidence record](docs/portfolio/v0.7-semantic-contract-governance.md).
 
-The latest formal Python test scope is `192 passed, 1 warning`.
+### v0.8 Multi-source Isolation and Chinook Admission
+
+The v0.8 work first closes a source-isolation gap in Schema Memory: vector filters, Neo4j traversal, schema hydration, and RRF identities now carry the active database name. An explicit fail-closed migration method checks the legacy graph before replacing the old `schema + table` uniqueness constraint; it is not run automatically during startup.
+
+The second source is the official Chinook 1.4.5 PostgreSQL sample. The local snapshot contains 11 tables, 64 columns, 11 foreign keys, and 15,607 rows. A separate Chinook 1.0.0 semantic catalog defines 12 metrics, and a separate 24-case Chinese benchmark covers single-table aggregation, multi-hop joins, a bridge table, a self-join, HAVING, CTEs, subqueries, and windows. All 24 reference SQL statements execute in read-only transactions, return non-empty results, and satisfy their declared SQL contracts.
+
+The explicit Neo4j migration and Chinook Schema Memory initialization are complete. After generic fixes for HAVING-plan alignment, CTE select-scope analysis, expression wrappers, numeric fingerprints, and an explicit date-granularity comparison policy, a fairness-checked 24-case r6 run found S0/S3/S5 business accuracy of 66.67%/70.83%/83.33%, wrong-but-executed rates of 33.33%/25.00%/12.50%, and P95 latency of 1.74/17.51/14.39 seconds. S5 passes the predefined 24-case development gates, but this remains a single-run development admission rather than a production accuracy guarantee. See [the v0.8 design and current evidence](docs/portfolio/v0.8-multi-source-admission.md).
+
+The v0.9 benchmark work is now in development: a machine-readable 100-case admission profile, coverage checker, reference-SQL-only validator, SQL feature-alternative contracts, and two reviewed expansion batches are implemented. The current set is 50/100; all 50 reference SQL statements execute read-only with non-empty results. No 50-case Agent accuracy is claimed yet. See [the v0.9 benchmark plan and status](docs/portfolio/v0.9-production-benchmark.md).
+
+The v0.10-A1 implementation now provides a bounded Run/Event lifecycle, an atomic single-process development store, mandatory idempotent creation, tenant/user-scoped reads, ordered event cursors, optimistic versions, and idempotent cancellation. The existing Chat Agent is not yet executed by a background Run worker, and live SSE, Step/Tool traces, approval recovery, and multi-instance storage remain pending. The project intentionally keeps the current governed single-Agent pattern instead of adding a multi-Agent layer without measured benefit. See [the product scope and KPIs](docs/portfolio/product-scope-and-kpis.md), [the v0.10 runtime design and status](docs/portfolio/v0.10-governed-agent-runtime.md), and [ADR-0001](docs/adr/0001-single-agent-governed-runtime.md).
+
+The latest formal Python test scope is `229 passed, 1 warning`.
 
 ### Web Component
 
@@ -327,14 +340,14 @@ The handbook expands the README into components, advanced-features, use-case, an
 
 ### Ongoing
 
-1. Validate the v0.7 semantic-contract engine on a second data source with its own catalog, benchmark, confidence intervals, coverage target, and wrong-execution threshold. AdventureWorks results do not transfer automatically. See [the v0.7 record](docs/portfolio/v0.7-semantic-contract-governance.md).
+1. Complete v0.10-A2 by adapting the existing single Agent to queued Run execution, live SSE continuation, restart recovery, and concurrent cancellation; then add Step/Tool trace and redaction without changing SQL generation policy.
 
 <figure>
   <img src="docs/figures/use-cases/eval-driven%20iterations.png" alt="Eval-driven iterations" />
   <figcaption>Eval-driven iterations: use benchmark feedback to refine prompts, governance, and SQL recovery behavior.</figcaption>
 </figure>
 
-2. Establish a second data source with its own [accuracy admission contract](docs/portfolio/data-source-accuracy-contract-template.md), semantic definitions, frozen benchmark, and confidence/abstention metrics before making adaptive routing the default or making any cross-database accuracy claim.
+2. Keep the Chinook benchmark paused at 50/100 while the runtime event contract changes. Resume the [v0.9 plan](docs/portfolio/v0.9-production-benchmark.md), freeze a 60/20/20 development/test/holdout split, and run repeated real-model evaluation only after the v0.10 interfaces stabilize.
 
 
 ### Future Actions

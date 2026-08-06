@@ -2,6 +2,81 @@
 
 This file tracks changes maintained in `luyan9513/QueryMind-Enterprise` on top of the upstream QueryMind project.
 
+## Unreleased v0.10 (development)
+
+### Added
+
+- A bounded Agent-run lifecycle model with eight states, explicit transition rules, optimistic versions, terminal timestamps, and ordered redacted events.
+- An `AgentRunStore` boundary with async-safe memory tests and an atomic JSON development adapter that survives process restart without storing raw idempotency keys.
+- Versioned create/get/events/cancel APIs under `/api/querymind/v1/agent-runs`, including mandatory idempotency keys, request-conflict detection, tenant/user scoping, incremental event cursors, and idempotent cancellation.
+- The normal local launcher now mounts the file Agent-run store through `QUERYMIND_AGENT_RUNS_DIR`; existing chat endpoints and Text2SQL behavior are unchanged.
+
+### Documented
+
+- A focused product definition for governed sales and operations analytics, with explicit users, supported tasks, non-goals, offline admission metrics, and future online KPIs.
+- A durable single-Agent runtime design covering Run/Step/Event state, versioned APIs, idempotency, cancellation, trace/redaction, bounded recovery, clarification, and risk-based human approval.
+- ADR-0001 records why the project keeps a governed single-Agent pattern instead of adopting multi-Agent orchestration without measured benefit.
+- A source-audited readiness gap report distinguishes existing Agent/evaluation strengths from missing production runtime, observability, HITL, and concurrency evidence.
+
+### Limits
+
+- v0.10-A1 only creates queued lifecycle records; no worker currently executes the existing Chat Agent from a Run.
+- Event history supports cursor reads but not a live SSE wait loop. Step/Tool persistence, unified tracing, resumable approvals, feedback, and online KPI collection are not implemented.
+- The atomic file adapter is single-process development storage, not a multi-instance transactional store.
+- The v0.9 benchmark remains at 50/100 and has no 50-case real-model accuracy result; expansion resumes after the runtime event contract is stable.
+
+### Verified
+
+- Focused Agent-run/store/API/history scope: `10 passed, 1 warning`.
+- Formal Python scope: `229 passed, 1 warning`; focused Ruff and `git diff --check` passed.
+
+## Unreleased v0.9 (development)
+
+### Added
+
+- A machine-readable 100-case benchmark admission profile with difficulty, category, business-domain, SQL-tag, repeat, accuracy, coverage, error-rate, and latency gates.
+- A read-only coverage checker that does not connect to a database or model.
+- A reference-SQL validator that constructs only the configured SQL runner and does not initialize an LLM, Neo4j, or Schema Memory.
+- Twenty-six new Chinook cases across two reviewed batches, covering filtering, time series, year-over-year comparison, subqueries, per-group Top-N windows, null handling, CASE tiers, UNION, empty-dimension preservation, and cross-group comparison.
+- Alternative SQL-contract feature groups so semantically valid WHERE/HAVING implementations can satisfy the same dataset contract.
+
+### Verified
+
+- The development dataset now contains 50/100 planned cases; all 50 reference SQL statements execute read-only and return non-empty results.
+- The admission checker reports the remaining 50-case and per-stratum deficits instead of treating the partial dataset as production-ready; the filtering category has reached its minimum target.
+- Formal Python scope: `222 passed, 1 warning`; `git diff --check` passed.
+
+### Limits
+
+- No 50-case real-model accuracy is claimed yet. The latest Agent evidence remains the frozen 24-case v0.8 r6 comparison.
+- The benchmark is not frozen and has not reached 100 cases or three repeats per case.
+
+## Unreleased v0.8
+
+### Added
+
+- Database-scoped Schema Memory identities and filters across Mem0 vector search, Neo4j graph traversal, schema hydration, and RRF fusion.
+- An explicit fail-closed Neo4j migration for replacing the legacy `schema + table` constraint after preflight checks and field backfill.
+- Official Chinook 1.4.5 PostgreSQL evaluation data with upstream MIT license and recorded SHA-256.
+- A Chinook 1.0.0 semantic catalog with 12 approved metrics and a separate 24-case Chinese business benchmark.
+- Regression tests for active-database propagation, same-name table isolation, composite identity, and migration ordering.
+- Repeatable `--case-id` evaluation subsets and semantic-contract validation across CTEs and wrapped metric expressions.
+
+### Verified
+
+- Chinook local snapshot: 11 tables, 64 columns, 11 foreign keys, and 15,607 rows; the existing `querymind` role has SELECT on every public table.
+- All 24 Chinook reference SQL statements execute in read-only transactions, return non-empty results, and pass their declared SQL contracts.
+- Neo4j pre-migration dump, explicit compound-identity migration, and Chinook Schema Memory initialization completed with 0 cross-source relationships.
+- Fair r6 24-case S0/S3/S5 comparison: business accuracy 66.67%/70.83%/83.33%, wrong-executed 33.33%/25.00%/12.50%, P95 1.74/17.51/14.39 seconds.
+- Generic fixes for aggregate HAVING plan filters, CTE SELECT-scope grain checks, wrapped semantic expressions, equivalent numeric result types, and dataset-owned date-granularity comparison.
+- Formal Python scope: `213 passed, 1 warning`; `git diff --check` passed.
+
+### Limits
+
+- Chinook passes the predefined 24-case development gates. This does not constitute production admission: only one r6 run exists, the Wilson interval remains wide, and the benchmark must expand to at least 100 stratified questions with repeated runs.
+- A post-run wrapped-expression false-block fix passed local tests, but its full real-model rerun was stopped by model-provider insufficient balance and is not included in the result.
+- The 24-case development benchmark is not a production guarantee; formal source admission should expand to at least 100 stratified questions and repeated runs.
+
 ## Unreleased v0.7
 
 ### Added
