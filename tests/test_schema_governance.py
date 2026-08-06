@@ -699,6 +699,26 @@ def test_schema_retrieve_caps_only_unseeded_initial_search() -> None:
     assert expanded.metadata["effective_limit"] == 20
 
 
+def test_schema_retrieve_scopes_search_to_active_database() -> None:
+    memory = _CapturingSchemaMemory()
+    tool = SchemaRetrieveTool(schema_memory=memory)
+    context = ToolContext(
+        user=_make_user(),
+        conversation_id="conv-source-scope",
+        request_id="req-source-scope",
+        agent_memory=_DummyAgentMemory(),
+        metadata={"database_id": "source_b"},
+    )
+
+    result = asyncio.run(
+        tool.execute(context, SchemaRetrieveToolArgs(query="customer orders"))
+    )
+
+    assert result.success is True
+    assert memory.calls[0]["database_name"] == "source_b"
+    assert result.metadata["database_name"] == "source_b"
+
+
 def test_schema_retrieve_uses_exact_table_names_without_semantic_search() -> None:
     memory = _ExactSchemaMemory()
     tool = SchemaRetrieveTool(schema_memory=memory)

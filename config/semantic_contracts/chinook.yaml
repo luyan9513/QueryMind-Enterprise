@@ -1,0 +1,170 @@
+data_source_id: chinook
+version: "1.0.0"
+description: Chinook 独立业务口径目录，用于验证通用语义合同引擎的跨数据源迁移能力。
+
+metrics:
+  - id: sales.invoice_total
+    name: 账单销售总额
+    aliases: [销售总额, 累计消费金额, 消费金额]
+    description: 销售总额使用账单头 Invoice.Total，避免把账单行再次连接后重复累计。
+    status: approved
+    owner: chinook-sales
+    source_tables: [public.invoice]
+    required_columns: [public.invoice.total]
+    accepted_expressions: [SUM(total)]
+    output_alias: sales_total
+    accepted_output_aliases: [销售总额, 消费金额]
+    base_grain: one invoice
+    default_time_column: public.invoice.invoice_date
+
+  - id: sales.invoice_count
+    name: 订单数
+    aliases: [订单数, 订单笔数, 下了多少笔订单]
+    description: 一张 Invoice 账单计为一笔订单。
+    status: approved
+    owner: chinook-sales
+    source_tables: [public.invoice]
+    required_columns: []
+    accepted_expressions: [COUNT(*), COUNT(invoice_id)]
+    output_alias: invoice_count
+    accepted_output_aliases: [订单数, 订单笔数]
+    base_grain: one invoice
+    default_time_column: public.invoice.invoice_date
+
+  - id: sales.average_invoice_value
+    name: 平均客单价
+    aliases: [平均客单价, 平均订单金额]
+    description: 平均客单价为账单头 Total 的平均值。
+    status: approved
+    owner: chinook-sales
+    source_tables: [public.invoice]
+    required_columns: [public.invoice.total]
+    accepted_expressions: [AVG(total)]
+    output_alias: average_invoice_value
+    accepted_output_aliases: [平均客单价, 平均订单金额]
+    base_grain: one invoice
+    default_time_column: public.invoice.invoice_date
+
+  - id: sales.line_revenue
+    name: 销售明细收入
+    aliases: [音乐流派销售收入, 艺术家销售收入, 曲目销售收入]
+    description: 按曲目、流派或艺术家分析收入时，使用 InvoiceLine.UnitPrice 乘 Quantity 后求和。
+    status: approved
+    owner: chinook-sales
+    source_tables: [public.invoice_line]
+    required_columns:
+      - public.invoice_line.unit_price
+      - public.invoice_line.quantity
+    accepted_expressions: [SUM(unit_price * quantity)]
+    output_alias: sales_revenue
+    accepted_output_aliases: [销售收入, 收入]
+    base_grain: one invoice line
+
+  - id: sales.quantity_sold
+    name: 曲目销售数量
+    aliases: [销量, 销售数量]
+    description: 曲目销量为 InvoiceLine.Quantity 的合计。
+    status: approved
+    owner: chinook-sales
+    source_tables: [public.invoice_line]
+    required_columns: [public.invoice_line.quantity]
+    accepted_expressions: [SUM(quantity)]
+    output_alias: quantity_sold
+    accepted_output_aliases: [销量, 销售数量]
+    base_grain: one invoice line
+
+  - id: customer.customer_count
+    name: 客户数量
+    aliases: [客户数, 多少名客户]
+    description: Customer 主表每一行计为一名客户。
+    status: approved
+    owner: chinook-customer
+    source_tables: [public.customer]
+    required_columns: []
+    accepted_expressions: [COUNT(*), COUNT(customer_id)]
+    output_alias: customer_count
+    accepted_output_aliases: [客户数量, 客户数]
+    base_grain: one customer
+
+  - id: customer.active_customer_count
+    name: 下单客户数
+    aliases: [不同客户下单, 活跃客户数]
+    description: 按账单中的 CustomerID 去重计数。
+    status: approved
+    owner: chinook-customer
+    source_tables: [public.invoice]
+    required_columns: [public.invoice.customer_id]
+    accepted_expressions: [COUNT(DISTINCT customer_id)]
+    output_alias: active_customer_count
+    accepted_output_aliases: [活跃客户数, 下单客户数]
+    base_grain: one distinct customer
+    default_time_column: public.invoice.invoice_date
+
+  - id: catalog.track_count
+    name: 曲目数
+    aliases: [曲目数, 多少首曲目]
+    description: 按场景使用 TrackID 计数；播放列表场景必须对 TrackID 去重。
+    status: approved
+    owner: chinook-catalog
+    source_tables: [public.track]
+    required_columns: [public.track.track_id]
+    accepted_expressions: [COUNT(track_id), COUNT(DISTINCT track_id)]
+    output_alias: track_count
+    accepted_output_aliases: [曲目数]
+    base_grain: one track
+
+  - id: catalog.album_count
+    name: 专辑数
+    aliases: [专辑数, 多少张专辑]
+    description: 专辑数量按 AlbumID 计数。
+    status: approved
+    owner: chinook-catalog
+    source_tables: [public.album]
+    required_columns: [public.album.album_id]
+    accepted_expressions: [COUNT(album_id)]
+    output_alias: album_count
+    accepted_output_aliases: [专辑数]
+    base_grain: one album
+
+  - id: catalog.average_track_duration
+    name: 平均曲目时长
+    aliases: [平均曲目时长, 平均时长]
+    description: 曲目平均时长以 Track.Milliseconds 求平均，展示分钟时除以 60000。
+    status: approved
+    owner: chinook-catalog
+    source_tables: [public.track]
+    required_columns: [public.track.milliseconds]
+    accepted_expressions:
+      - AVG(milliseconds)
+      - AVG(milliseconds) / 60000.0
+    output_alias: avg_duration_minutes
+    accepted_output_aliases: [平均时长, 平均曲目时长]
+    base_grain: one track
+
+  - id: sales.invoice_line_count
+    name: 账单明细数
+    aliases: [账单包含多少条明细, 明细数]
+    description: 一条 InvoiceLine 计为一条账单明细。
+    status: approved
+    owner: chinook-sales
+    source_tables: [public.invoice_line]
+    required_columns: [public.invoice_line.invoice_line_id]
+    accepted_expressions: [COUNT(invoice_line_id)]
+    output_alias: line_count
+    accepted_output_aliases: [明细数]
+    base_grain: one invoice line
+
+  - id: employee.direct_report_count
+    name: 直属员工数
+    aliases: [直接下属, 直属员工数]
+    description: Employee 自连接中，ReportsTo 指向经理 EmployeeID；按下属 EmployeeID 计数。
+    status: approved
+    owner: chinook-hr
+    source_tables: [public.employee]
+    required_columns:
+      - public.employee.employee_id
+      - public.employee.reports_to
+    accepted_expressions: [COUNT(employee_id)]
+    output_alias: direct_report_count
+    accepted_output_aliases: [直接下属数, 直属员工数]
+    base_grain: one direct-report employee

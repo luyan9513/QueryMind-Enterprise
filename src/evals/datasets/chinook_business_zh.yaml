@@ -1,0 +1,1215 @@
+dataset:
+  name: "Chinook 中文经营问答跨数据源基准 v0.9-dev"
+  description: "50 条独立设计的数字媒体商店业务问题；前 24 题保留 v0.8 基线，新增题用于逐步建设 100 题生产候选基准。"
+
+  test_cases:
+    - id: "ch_zh_001"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "各账单国家或地区的销售总额是多少？按销售总额从高到低排列。"
+      ground_truth_sql: |
+        SELECT billing_country, SUM(total) AS sales_total
+        FROM public.invoice
+        GROUP BY billing_country
+        ORDER BY sales_total DESC, billing_country;
+      expected_schema: {tables: ["public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2, order_sensitive: false}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "order_by"]
+        required_columns: ["billing_country", "total"]
+        max_projection_count: 2
+      tags: ["aggregation", "group_by", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "ch_zh_002"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "统计 2024 年每个月的订单数和销售总额，按月份排列。"
+      ground_truth_sql: |
+        SELECT DATE_TRUNC('month', invoice_date)::date AS sales_month,
+               COUNT(*) AS invoice_count,
+               SUM(total) AS sales_total
+        FROM public.invoice
+        WHERE invoice_date >= DATE '2024-01-01' AND invoice_date < DATE '2025-01-01'
+        GROUP BY DATE_TRUNC('month', invoice_date)
+        ORDER BY sales_month;
+      expected_schema: {tables: ["public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "where", "order_by"]
+        required_columns: ["invoice_date", "total"]
+        required_filter_columns: ["invoice_date"]
+      tags: ["aggregation", "date_filter", "time_series", "group_by"]
+      difficulty: "easy"
+      metadata: {category: "time_series", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "ch_zh_003"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "累计消费金额最高的 10 位客户是谁？返回客户编号、合并后的客户姓名和消费金额；金额并列时按客户编号从小到大排列。"
+      ground_truth_sql: |
+        SELECT c.customer_id,
+               c.first_name || ' ' || c.last_name AS customer_name,
+               SUM(i.total) AS sales_total
+        FROM public.customer AS c
+        JOIN public.invoice AS i ON i.customer_id = c.customer_id
+        GROUP BY c.customer_id, c.first_name, c.last_name
+        ORDER BY sales_total DESC, c.customer_id
+        LIMIT 10;
+      expected_schema: {tables: ["public.customer", "public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by", "limit"]
+        required_columns: ["customer_id", "first_name", "last_name", "total"]
+        max_projection_count: 3
+      tags: ["aggregation", "join", "topk", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "topk", source: "manual", query_language: "zh", business_domain: "customer"}
+
+    - id: "ch_zh_004"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "销售收入最高的 10 位艺术家是谁？返回艺术家名称和收入。"
+      ground_truth_sql: |
+        SELECT ar.name AS artist_name,
+               SUM(il.unit_price * il.quantity) AS sales_revenue
+        FROM public.invoice_line AS il
+        JOIN public.track AS t ON t.track_id = il.track_id
+        JOIN public.album AS al ON al.album_id = t.album_id
+        JOIN public.artist AS ar ON ar.artist_id = al.artist_id
+        GROUP BY ar.artist_id, ar.name
+        ORDER BY sales_revenue DESC, artist_name
+        LIMIT 10;
+      expected_schema: {tables: ["public.invoice_line", "public.track", "public.album", "public.artist"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by", "limit"]
+        required_columns: ["unit_price", "quantity", "track_id", "album_id", "artist_id"]
+        max_projection_count: 2
+      tags: ["aggregation", "multi_table", "join", "topk"]
+      difficulty: "medium"
+      metadata: {category: "join", source: "manual", query_language: "zh", business_domain: "catalog"}
+
+    - id: "ch_zh_005"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "各音乐流派的销售收入是多少？按收入从高到低排列；收入并列时按流派名称排列。"
+      ground_truth_sql: |
+        SELECT g.name AS genre_name,
+               SUM(il.unit_price * il.quantity) AS sales_revenue
+        FROM public.invoice_line AS il
+        JOIN public.track AS t ON t.track_id = il.track_id
+        JOIN public.genre AS g ON g.genre_id = t.genre_id
+        GROUP BY g.genre_id, g.name
+        ORDER BY sales_revenue DESC, genre_name;
+      expected_schema: {tables: ["public.invoice_line", "public.track", "public.genre"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by"]
+        required_columns: ["unit_price", "quantity", "track_id", "genre_id"]
+        max_projection_count: 2
+      tags: ["aggregation", "join", "multi_table", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "join", source: "manual", query_language: "zh", business_domain: "catalog"}
+
+    - id: "ch_zh_006"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "销量最高的 10 首曲目是什么？返回曲目名称和销售数量；销量并列时按曲目名称排列。"
+      ground_truth_sql: |
+        SELECT t.name AS track_name, SUM(il.quantity) AS quantity_sold
+        FROM public.invoice_line AS il
+        JOIN public.track AS t ON t.track_id = il.track_id
+        GROUP BY t.track_id, t.name
+        ORDER BY quantity_sold DESC, track_name
+        LIMIT 10;
+      expected_schema: {tables: ["public.invoice_line", "public.track"]}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by", "limit"]
+        required_columns: ["quantity", "track_id"]
+        max_projection_count: 2
+      tags: ["aggregation", "join", "topk", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "topk", source: "manual", query_language: "zh", business_domain: "catalog"}
+
+    - id: "ch_zh_007"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "每个客户国家或地区有多少名客户？按客户数从高到低排列；客户数并列时按国家或地区名称排列。"
+      ground_truth_sql: |
+        SELECT country, COUNT(*) AS customer_count
+        FROM public.customer
+        GROUP BY country
+        ORDER BY customer_count DESC, country;
+      expected_schema: {tables: ["public.customer"]}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "order_by"]
+        required_columns: ["country"]
+        max_projection_count: 2
+      tags: ["aggregation", "group_by", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "customer"}
+
+    - id: "ch_zh_008"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "每位客户下了多少笔订单？返回客户编号、合并后的客户姓名和订单数；只保留订单数不少于 7 笔的客户，按订单数从高到低、客户编号从小到大排列。"
+      ground_truth_sql: |
+        SELECT c.customer_id,
+               c.first_name || ' ' || c.last_name AS customer_name,
+               COUNT(i.invoice_id) AS invoice_count
+        FROM public.customer AS c
+        JOIN public.invoice AS i ON i.customer_id = c.customer_id
+        GROUP BY c.customer_id, c.first_name, c.last_name
+        HAVING COUNT(i.invoice_id) >= 7
+        ORDER BY invoice_count DESC, c.customer_id;
+      expected_schema: {tables: ["public.customer", "public.invoice"]}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "having", "order_by"]
+        required_columns: ["customer_id", "invoice_id"]
+        max_projection_count: 3
+      tags: ["aggregation", "join", "having", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "customer"}
+
+    - id: "ch_zh_009"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "每位销售支持员工负责的客户产生了多少销售额？返回员工编号、合并后的员工姓名和销售额；按销售额从高到低、员工编号从小到大排列。"
+      ground_truth_sql: |
+        SELECT e.employee_id,
+               e.first_name || ' ' || e.last_name AS employee_name,
+               SUM(i.total) AS sales_total
+        FROM public.employee AS e
+        JOIN public.customer AS c ON c.support_rep_id = e.employee_id
+        JOIN public.invoice AS i ON i.customer_id = c.customer_id
+        GROUP BY e.employee_id, e.first_name, e.last_name
+        ORDER BY sales_total DESC, e.employee_id;
+      expected_schema: {tables: ["public.employee", "public.customer", "public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by"]
+        required_columns: ["employee_id", "support_rep_id", "customer_id", "total"]
+        max_projection_count: 3
+      tags: ["aggregation", "join", "multi_table", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "join", source: "manual", query_language: "zh", business_domain: "employee"}
+
+    - id: "ch_zh_010"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "各经理有多少名直接下属？返回经理编号、合并后的经理姓名和直属员工数；按直属员工数从高到低、经理编号从小到大排列。"
+      ground_truth_sql: |
+        SELECT m.employee_id,
+               m.first_name || ' ' || m.last_name AS manager_name,
+               COUNT(e.employee_id) AS direct_report_count
+        FROM public.employee AS m
+        JOIN public.employee AS e ON e.reports_to = m.employee_id
+        GROUP BY m.employee_id, m.first_name, m.last_name
+        ORDER BY direct_report_count DESC, m.employee_id;
+      expected_schema: {tables: ["public.employee"]}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by"]
+        required_columns: ["employee_id", "reports_to"]
+        max_projection_count: 3
+      tags: ["aggregation", "join", "group_by", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "join", source: "manual", query_language: "zh", business_domain: "employee"}
+
+    - id: "ch_zh_011"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "每个播放列表包含多少首不同曲目？按曲目数从高到低排列。"
+      ground_truth_sql: |
+        SELECT p.playlist_id, p.name AS playlist_name,
+               COUNT(DISTINCT pt.track_id) AS track_count
+        FROM public.playlist AS p
+        LEFT JOIN public.playlist_track AS pt ON pt.playlist_id = p.playlist_id
+        GROUP BY p.playlist_id, p.name
+        ORDER BY track_count DESC, p.playlist_id;
+      expected_schema: {tables: ["public.playlist", "public.playlist_track"]}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "distinct", "order_by"]
+        required_columns: ["playlist_id", "track_id"]
+        max_projection_count: 3
+      tags: ["aggregation", "join", "distinct", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "join", source: "manual", query_language: "zh", business_domain: "catalog"}
+
+    - id: "ch_zh_012"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "曲目数最多的 10 张专辑是什么？返回专辑编号、专辑名称、艺术家和曲目数；曲目数并列时按专辑编号从小到大排列。"
+      ground_truth_sql: |
+        SELECT al.album_id, al.title AS album_title, ar.name AS artist_name,
+               COUNT(t.track_id) AS track_count
+        FROM public.album AS al
+        JOIN public.artist AS ar ON ar.artist_id = al.artist_id
+        LEFT JOIN public.track AS t ON t.album_id = al.album_id
+        GROUP BY al.album_id, al.title, ar.name
+        ORDER BY track_count DESC, al.album_id
+        LIMIT 10;
+      expected_schema: {tables: ["public.album", "public.artist", "public.track"]}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by", "limit"]
+        required_columns: ["album_id", "artist_id", "track_id"]
+        max_projection_count: 4
+      tags: ["aggregation", "join", "topk", "multi_table"]
+      difficulty: "medium"
+      metadata: {category: "topk", source: "manual", query_language: "zh", business_domain: "catalog"}
+
+    - id: "ch_zh_013"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "时长最长的 10 首曲目是什么？返回曲目编号、曲目名称和分钟数；时长并列时按曲目编号从小到大排列。"
+      ground_truth_sql: |
+        SELECT track_id, name AS track_name,
+               ROUND(milliseconds / 60000.0, 2) AS duration_minutes
+        FROM public.track
+        ORDER BY milliseconds DESC, track_id
+        LIMIT 10;
+      expected_schema: {tables: ["public.track"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["order_by", "limit"]
+        required_columns: ["track_id", "name", "milliseconds"]
+        max_projection_count: 3
+      tags: ["aggregation", "topk", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "topk", source: "manual", query_language: "zh", business_domain: "catalog"}
+
+    - id: "ch_zh_014"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "各种媒体类型分别有多少首曲目？按曲目数从高到低排列。"
+      ground_truth_sql: |
+        SELECT mt.name AS media_type_name, COUNT(t.track_id) AS track_count
+        FROM public.media_type AS mt
+        LEFT JOIN public.track AS t ON t.media_type_id = mt.media_type_id
+        GROUP BY mt.media_type_id, mt.name
+        ORDER BY track_count DESC, media_type_name;
+      expected_schema: {tables: ["public.media_type", "public.track"]}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by"]
+        required_columns: ["media_type_id", "track_id"]
+        max_projection_count: 2
+      tags: ["aggregation", "join", "group_by", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "catalog"}
+
+    - id: "ch_zh_015"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "各音乐流派的平均曲目时长是多少分钟？按平均时长从高到低排列。"
+      ground_truth_sql: |
+        SELECT g.name AS genre_name,
+               ROUND(AVG(t.milliseconds) / 60000.0, 2) AS avg_duration_minutes
+        FROM public.genre AS g
+        JOIN public.track AS t ON t.genre_id = g.genre_id
+        GROUP BY g.genre_id, g.name
+        ORDER BY avg_duration_minutes DESC, genre_name;
+      expected_schema: {tables: ["public.genre", "public.track"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by"]
+        required_columns: ["genre_id", "milliseconds"]
+        max_projection_count: 2
+      tags: ["aggregation", "join", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "catalog"}
+
+    - id: "ch_zh_016"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "哪些客户的累计消费金额高于所有客户的平均累计消费金额？返回客户编号、合并后的客户姓名和累计消费金额；按消费金额从高到低、客户编号从小到大排列。"
+      ground_truth_sql: |
+        WITH customer_sales AS (
+          SELECT c.customer_id,
+                 c.first_name || ' ' || c.last_name AS customer_name,
+                 SUM(i.total) AS sales_total
+          FROM public.customer AS c
+          JOIN public.invoice AS i ON i.customer_id = c.customer_id
+          GROUP BY c.customer_id, c.first_name, c.last_name
+        )
+        SELECT customer_id, customer_name, sales_total
+        FROM customer_sales
+        WHERE sales_total > (SELECT AVG(sales_total) FROM customer_sales)
+        ORDER BY sales_total DESC, customer_id;
+      expected_schema: {tables: ["public.customer", "public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by"]
+        required_feature_groups: [["where", "having"]]
+        required_columns: ["customer_id", "total"]
+        max_projection_count: 3
+      tags: ["aggregation", "cte", "subquery", "ordering"]
+      difficulty: "hard"
+      metadata: {category: "subquery", source: "manual", query_language: "zh", business_domain: "customer"}
+
+    - id: "ch_zh_017"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "每个月有多少名不同客户下单？按月份排列。"
+      ground_truth_sql: |
+        SELECT DATE_TRUNC('month', invoice_date)::date AS sales_month,
+               COUNT(DISTINCT customer_id) AS active_customer_count
+        FROM public.invoice
+        GROUP BY DATE_TRUNC('month', invoice_date)
+        ORDER BY sales_month;
+      expected_schema: {tables: ["public.invoice"]}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "distinct", "order_by"]
+        required_columns: ["invoice_date", "customer_id"]
+        max_projection_count: 2
+      tags: ["aggregation", "distinct", "time_series", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "time_series", source: "manual", query_language: "zh", business_domain: "customer"}
+
+    - id: "ch_zh_018"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "每张账单包含多少条明细？返回账单编号、账单日期和明细数；只保留明细数大于 5 条的账单，按明细数从高到低、账单编号从小到大排列。"
+      ground_truth_sql: |
+        SELECT i.invoice_id, i.invoice_date::date AS invoice_date,
+               COUNT(il.invoice_line_id) AS line_count
+        FROM public.invoice AS i
+        JOIN public.invoice_line AS il ON il.invoice_id = i.invoice_id
+        GROUP BY i.invoice_id, i.invoice_date
+        HAVING COUNT(il.invoice_line_id) > 5
+        ORDER BY line_count DESC, i.invoice_id;
+      expected_schema: {tables: ["public.invoice", "public.invoice_line"]}
+      result_comparison:
+        temporal_granularity: "date"
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "having", "order_by"]
+        required_columns: ["invoice_id", "invoice_line_id", "invoice_date"]
+        max_projection_count: 3
+      tags: ["aggregation", "join", "having", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "ch_zh_019"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "各艺术家发行了多少张专辑？返回艺术家编号、艺术家名称和专辑数；只保留至少有 5 张专辑的艺术家，按专辑数从高到低、艺术家编号从小到大排列。"
+      ground_truth_sql: |
+        SELECT ar.artist_id, ar.name AS artist_name,
+               COUNT(al.album_id) AS album_count
+        FROM public.artist AS ar
+        JOIN public.album AS al ON al.artist_id = ar.artist_id
+        GROUP BY ar.artist_id, ar.name
+        HAVING COUNT(al.album_id) >= 5
+        ORDER BY album_count DESC, ar.artist_id;
+      expected_schema: {tables: ["public.artist", "public.album"]}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "having", "order_by"]
+        required_columns: ["artist_id", "album_id"]
+        max_projection_count: 3
+      tags: ["aggregation", "join", "having", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "catalog"}
+
+    - id: "ch_zh_020"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "创作曲目数最多的 10 位作曲者是谁？忽略未填写作曲者的曲目。"
+      ground_truth_sql: |
+        SELECT composer, COUNT(*) AS track_count
+        FROM public.track
+        WHERE composer IS NOT NULL AND composer <> ''
+        GROUP BY composer
+        ORDER BY track_count DESC, composer
+        LIMIT 10;
+      expected_schema: {tables: ["public.track"]}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "where", "order_by", "limit"]
+        required_columns: ["composer"]
+        required_filter_columns: ["composer"]
+        max_projection_count: 2
+      tags: ["aggregation", "null_handling", "topk", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "topk", source: "manual", query_language: "zh", business_domain: "catalog"}
+
+    - id: "ch_zh_021"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "各账单国家或地区的平均客单价是多少？按平均客单价从高到低排列；平均客单价并列时按国家或地区名称排列。"
+      ground_truth_sql: |
+        SELECT billing_country, AVG(total) AS average_invoice_value
+        FROM public.invoice
+        GROUP BY billing_country
+        ORDER BY average_invoice_value DESC, billing_country;
+      expected_schema: {tables: ["public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "order_by"]
+        required_columns: ["billing_country", "total"]
+        max_projection_count: 2
+      tags: ["aggregation", "group_by", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "ch_zh_022"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "按年份统计销售总额、订单数和平均客单价，按年份排列。"
+      ground_truth_sql: |
+        SELECT EXTRACT(YEAR FROM invoice_date)::int AS sales_year,
+               SUM(total) AS sales_total,
+               COUNT(*) AS invoice_count,
+               AVG(total) AS average_invoice_value
+        FROM public.invoice
+        GROUP BY EXTRACT(YEAR FROM invoice_date)
+        ORDER BY sales_year;
+      expected_schema: {tables: ["public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "order_by"]
+        required_columns: ["invoice_date", "total"]
+        max_projection_count: 4
+      tags: ["aggregation", "time_series", "group_by", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "time_series", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "ch_zh_023"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "各音乐流派中销售收入最高的曲目是什么？返回流派、曲目和收入；收入并列时选择 track_id 最小的曲目。"
+      ground_truth_sql: |
+        WITH track_sales AS (
+          SELECT g.genre_id, g.name AS genre_name, t.track_id,
+                 t.name AS track_name,
+                 SUM(il.unit_price * il.quantity) AS sales_revenue
+          FROM public.genre AS g
+          JOIN public.track AS t ON t.genre_id = g.genre_id
+          JOIN public.invoice_line AS il ON il.track_id = t.track_id
+          GROUP BY g.genre_id, g.name, t.track_id, t.name
+        ), ranked AS (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY genre_id ORDER BY sales_revenue DESC, track_id
+          ) AS revenue_rank
+          FROM track_sales
+        )
+        SELECT genre_name, track_name, sales_revenue
+        FROM ranked
+        WHERE revenue_rank = 1
+        ORDER BY genre_name;
+      expected_schema: {tables: ["public.genre", "public.track", "public.invoice_line"]}
+      result_comparison: {numeric_decimal_places: 2, order_sensitive: false}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "join", "order_by"]
+        required_columns: ["genre_id", "track_id", "unit_price", "quantity"]
+        max_projection_count: 3
+      tags: ["aggregation", "window", "multi_table", "ranking"]
+      difficulty: "hard"
+      metadata: {category: "window", source: "manual", query_language: "zh", business_domain: "catalog"}
+
+    - id: "ch_zh_024"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "每位客户最近一次下单日期和距离上一次下单的天数是多少？返回客户编号、合并后的客户姓名、最近下单日期和间隔天数；只保留至少有两笔订单的客户，按客户编号从小到大排列。"
+      ground_truth_sql: |
+        WITH ordered_invoices AS (
+          SELECT customer_id, invoice_date,
+                 LAG(invoice_date) OVER (
+                   PARTITION BY customer_id ORDER BY invoice_date, invoice_id
+                 ) AS previous_invoice_date,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY customer_id ORDER BY invoice_date DESC, invoice_id DESC
+                 ) AS latest_rank,
+                 COUNT(*) OVER (PARTITION BY customer_id) AS invoice_count
+          FROM public.invoice
+        )
+        SELECT c.customer_id,
+               c.first_name || ' ' || c.last_name AS customer_name,
+               oi.invoice_date::date AS latest_invoice_date,
+               (oi.invoice_date::date - oi.previous_invoice_date::date) AS days_since_previous
+        FROM ordered_invoices AS oi
+        JOIN public.customer AS c ON c.customer_id = oi.customer_id
+        WHERE oi.latest_rank = 1 AND oi.invoice_count >= 2
+        ORDER BY c.customer_id;
+      expected_schema: {tables: ["public.invoice", "public.customer"]}
+      expected_sql_contract:
+        required_features: ["join", "where", "order_by"]
+        required_columns: ["customer_id", "invoice_date", "invoice_id"]
+        max_projection_count: 4
+      tags: ["window", "time_series", "join", "ordering"]
+      difficulty: "hard"
+      metadata: {category: "window", source: "manual", query_language: "zh", business_domain: "customer"}
+
+    - id: "ch_zh_025"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "比较 2023 年和 2024 年各月份的销售总额，并计算 2024 年相对 2023 年的销售额变化；返回月份、两年销售额和变化额，按月份排列。"
+      ground_truth_sql: |
+        SELECT EXTRACT(MONTH FROM invoice_date)::int AS sales_month,
+               SUM(CASE WHEN EXTRACT(YEAR FROM invoice_date) = 2023 THEN total ELSE 0 END) AS sales_2023,
+               SUM(CASE WHEN EXTRACT(YEAR FROM invoice_date) = 2024 THEN total ELSE 0 END) AS sales_2024,
+               SUM(CASE WHEN EXTRACT(YEAR FROM invoice_date) = 2024 THEN total ELSE 0 END)
+                 - SUM(CASE WHEN EXTRACT(YEAR FROM invoice_date) = 2023 THEN total ELSE 0 END) AS sales_change
+        FROM public.invoice
+        WHERE invoice_date >= DATE '2023-01-01' AND invoice_date < DATE '2025-01-01'
+        GROUP BY EXTRACT(MONTH FROM invoice_date)
+        ORDER BY sales_month;
+      expected_schema: {tables: ["public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "case_when", "group_by", "where", "order_by"]
+        required_columns: ["invoice_date", "total"]
+        required_filter_columns: ["invoice_date"]
+        max_projection_count: 4
+      tags: ["aggregation", "comparison", "time_series", "date_filter", "case_when", "group_by"]
+      difficulty: "hard"
+      metadata: {category: "comparison", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "ch_zh_026"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "哪些专辑的曲目数高于所有专辑的平均曲目数？返回专辑编号、专辑名称、艺术家名称和曲目数，按曲目数从高到低、专辑编号从小到大排列。"
+      ground_truth_sql: |
+        WITH album_counts AS (
+          SELECT al.album_id, al.title AS album_title, ar.name AS artist_name,
+                 COUNT(t.track_id) AS track_count
+          FROM public.album AS al
+          JOIN public.artist AS ar ON ar.artist_id = al.artist_id
+          LEFT JOIN public.track AS t ON t.album_id = al.album_id
+          GROUP BY al.album_id, al.title, ar.name
+        )
+        SELECT album_id, album_title, artist_name, track_count
+        FROM album_counts
+        WHERE track_count > (SELECT AVG(track_count) FROM album_counts)
+        ORDER BY track_count DESC, album_id;
+      expected_schema: {tables: ["public.album", "public.artist", "public.track"]}
+      expected_sql_contract:
+        required_features: ["aggregation", "cte", "subquery", "join", "where", "order_by"]
+        required_columns: ["album_id", "artist_id", "track_id"]
+        max_projection_count: 4
+      tags: ["aggregation", "subquery", "cte", "join", "multi_table", "comparison", "ordering"]
+      difficulty: "hard"
+      metadata: {category: "subquery", source: "manual", query_language: "zh", business_domain: "catalog"}
+
+    - id: "ch_zh_027"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "找出每个音乐流派中销售收入最高的 3 首曲目，只统计有销售记录的曲目；返回流派、曲目编号、曲目名称、收入和流派内排名，收入并列时按曲目编号从小到大排列。"
+      ground_truth_sql: |
+        WITH track_sales AS (
+          SELECT g.genre_id, g.name AS genre_name, t.track_id, t.name AS track_name,
+                 SUM(il.unit_price * il.quantity) AS sales_revenue
+          FROM public.genre AS g
+          JOIN public.track AS t ON t.genre_id = g.genre_id
+          JOIN public.invoice_line AS il ON il.track_id = t.track_id
+          GROUP BY g.genre_id, g.name, t.track_id, t.name
+        ), ranked AS (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY genre_id ORDER BY sales_revenue DESC, track_id
+          ) AS genre_rank
+          FROM track_sales
+        )
+        SELECT genre_name, track_id, track_name, sales_revenue, genre_rank
+        FROM ranked
+        WHERE genre_rank <= 3
+        ORDER BY genre_name, genre_rank, track_id;
+      expected_schema: {tables: ["public.genre", "public.track", "public.invoice_line"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "cte", "window", "join", "where", "order_by"]
+        required_columns: ["genre_id", "track_id", "unit_price", "quantity"]
+        max_projection_count: 5
+      tags: ["aggregation", "window", "ranking", "topk", "cte", "join", "multi_table"]
+      difficulty: "hard"
+      metadata: {category: "window", source: "manual", query_language: "zh", business_domain: "catalog"}
+
+    - id: "ch_zh_028"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "列出每位员工及其直属经理；没有直属经理的员工显示“无直属经理”。返回员工编号、员工姓名和经理姓名，按员工编号排列。"
+      ground_truth_sql: |
+        SELECT e.employee_id,
+               e.first_name || ' ' || e.last_name AS employee_name,
+               COALESCE(m.first_name || ' ' || m.last_name, '无直属经理') AS manager_name
+        FROM public.employee AS e
+        LEFT JOIN public.employee AS m ON m.employee_id = e.reports_to
+        ORDER BY e.employee_id;
+      expected_schema: {tables: ["public.employee"]}
+      expected_sql_contract:
+        required_features: ["join", "order_by"]
+        required_columns: ["employee_id", "reports_to", "first_name", "last_name"]
+        max_projection_count: 3
+      tags: ["join", "null_handling", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "null_handling", source: "manual", query_language: "zh", business_domain: "employee"}
+
+    - id: "ch_zh_029"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "按客户累计消费金额分层：不少于 45 为高价值、40（含）到 45（不含）为中价值、低于 40 为低价值。统计各层客户数和销售总额，按高价值、中价值、低价值顺序排列。"
+      ground_truth_sql: |
+        WITH customer_sales AS (
+          SELECT c.customer_id, SUM(i.total) AS sales_total
+          FROM public.customer AS c
+          JOIN public.invoice AS i ON i.customer_id = c.customer_id
+          GROUP BY c.customer_id
+        ), customer_tiers AS (
+          SELECT customer_id, sales_total,
+                 CASE
+                   WHEN sales_total >= 45 THEN '高价值'
+                   WHEN sales_total >= 40 THEN '中价值'
+                   ELSE '低价值'
+                 END AS customer_tier
+          FROM customer_sales
+        )
+        SELECT customer_tier, COUNT(*) AS customer_count,
+               SUM(sales_total) AS tier_sales_total
+        FROM customer_tiers
+        GROUP BY customer_tier
+        ORDER BY CASE customer_tier
+                   WHEN '高价值' THEN 1
+                   WHEN '中价值' THEN 2
+                   ELSE 3
+                 END;
+      expected_schema: {tables: ["public.customer", "public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "case_when", "cte", "join", "group_by", "order_by"]
+        required_columns: ["customer_id", "total"]
+        max_projection_count: 3
+      tags: ["aggregation", "case_when", "cte", "join", "multi_table", "group_by", "ordering"]
+      difficulty: "hard"
+      metadata: {category: "case_when", source: "manual", query_language: "zh", business_domain: "customer"}
+
+    - id: "ch_zh_030"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "分别查询美国和加拿大客户，再把两个结果集合并；返回客户编号、合并后的客户姓名和来源市场（USA 或 Canada），按来源市场和客户编号排列。"
+      ground_truth_sql: |
+        SELECT customer_id,
+               first_name || ' ' || last_name AS customer_name,
+               'USA' AS market
+        FROM public.customer
+        WHERE country = 'USA'
+        UNION ALL
+        SELECT customer_id,
+               first_name || ' ' || last_name AS customer_name,
+               'Canada' AS market
+        FROM public.customer
+        WHERE country = 'Canada'
+        ORDER BY market, customer_id;
+      expected_schema: {tables: ["public.customer"]}
+      expected_sql_contract:
+        required_features: ["where", "order_by"]
+        required_columns: ["customer_id", "first_name", "last_name", "country"]
+        required_filter_columns: ["country"]
+        max_projection_count: 3
+      tags: ["set_operation", "filtering", "text_filter", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "set_operation", source: "manual", query_language: "zh", business_domain: "customer"}
+
+    - id: "ch_zh_031"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "统计每位员工负责的客户数、这些客户的订单数和销售总额；没有负责客户或没有订单时显示 0。返回员工编号、员工姓名、客户数、订单数和销售总额，按员工编号排列。"
+      ground_truth_sql: |
+        SELECT e.employee_id,
+               e.first_name || ' ' || e.last_name AS employee_name,
+               COUNT(DISTINCT c.customer_id) AS customer_count,
+               COUNT(DISTINCT i.invoice_id) AS invoice_count,
+               COALESCE(SUM(i.total), 0) AS sales_total
+        FROM public.employee AS e
+        LEFT JOIN public.customer AS c ON c.support_rep_id = e.employee_id
+        LEFT JOIN public.invoice AS i ON i.customer_id = c.customer_id
+        GROUP BY e.employee_id, e.first_name, e.last_name
+        ORDER BY e.employee_id;
+      expected_schema: {tables: ["public.employee", "public.customer", "public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "distinct", "join", "group_by", "order_by"]
+        required_columns: ["employee_id", "support_rep_id", "customer_id", "invoice_id", "total"]
+        max_projection_count: 5
+      tags: ["aggregation", "distinct", "join", "multi_table", "null_handling", "group_by", "ordering"]
+      difficulty: "hard"
+      metadata: {category: "join", source: "manual", query_language: "zh", business_domain: "employee"}
+
+    - id: "ch_zh_032"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "哪些账单国家或地区的销售总额高于所有账单国家或地区的平均销售总额？返回国家或地区和销售总额，按销售总额从高到低排列。"
+      ground_truth_sql: |
+        WITH country_sales AS (
+          SELECT billing_country, SUM(total) AS sales_total
+          FROM public.invoice
+          GROUP BY billing_country
+        )
+        SELECT billing_country, sales_total
+        FROM country_sales
+        WHERE sales_total > (SELECT AVG(sales_total) FROM country_sales)
+        ORDER BY sales_total DESC, billing_country;
+      expected_schema: {tables: ["public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "cte", "subquery", "where", "order_by"]
+        required_columns: ["billing_country", "total"]
+        max_projection_count: 2
+      tags: ["aggregation", "subquery", "cte", "comparison", "ordering"]
+      difficulty: "hard"
+      metadata: {category: "comparison", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "ch_zh_033"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "列出 2024 年销售金额在 10（含）到 15（含）之间的账单；返回账单编号、账单日期、账单国家或地区和金额，按账单日期、账单编号排列。"
+      ground_truth_sql: |
+        SELECT invoice_id, invoice_date::date AS invoice_date,
+               billing_country, total
+        FROM public.invoice
+        WHERE invoice_date >= DATE '2024-01-01'
+          AND invoice_date < DATE '2025-01-01'
+          AND total BETWEEN 10 AND 15
+        ORDER BY invoice_date, invoice_id;
+      expected_schema: {tables: ["public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2, temporal_granularity: "date"}
+      expected_sql_contract:
+        required_features: ["where", "order_by"]
+        required_columns: ["invoice_id", "invoice_date", "billing_country", "total"]
+        required_filter_columns: ["invoice_date", "total"]
+        max_projection_count: 4
+      tags: ["filtering", "date_filter", "numeric_filter", "multi_condition", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "filtering", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "ch_zh_034"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "哪些美国或加拿大客户没有填写公司名称？返回客户编号、合并后的客户姓名、国家和公司名称，按国家、客户编号排列。"
+      ground_truth_sql: |
+        SELECT customer_id,
+               first_name || ' ' || last_name AS customer_name,
+               country, company
+        FROM public.customer
+        WHERE country IN ('USA', 'Canada')
+          AND (company IS NULL OR company = '')
+        ORDER BY country, customer_id;
+      expected_schema: {tables: ["public.customer"]}
+      expected_sql_contract:
+        required_features: ["where", "order_by"]
+        required_columns: ["customer_id", "first_name", "last_name", "country", "company"]
+        required_filter_columns: ["country", "company"]
+        max_projection_count: 4
+      tags: ["filtering", "null_handling", "text_filter", "multi_condition", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "filtering", source: "manual", query_language: "zh", business_domain: "customer"}
+
+    - id: "ch_zh_035"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "列出时长超过 8 分钟且已填写作曲者的曲目；返回曲目编号、曲目名称、作曲者和分钟数，按分钟数从高到低、曲目编号从小到大排列。"
+      ground_truth_sql: |
+        SELECT track_id, name AS track_name, composer,
+               milliseconds / 60000.0 AS duration_minutes
+        FROM public.track
+        WHERE milliseconds > 8 * 60 * 1000
+          AND composer IS NOT NULL
+          AND composer <> ''
+        ORDER BY duration_minutes DESC, track_id;
+      expected_schema: {tables: ["public.track"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["where", "order_by"]
+        required_columns: ["track_id", "name", "composer", "milliseconds"]
+        required_filter_columns: ["milliseconds", "composer"]
+        max_projection_count: 4
+      tags: ["filtering", "null_handling", "numeric_filter", "multi_condition", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "filtering", source: "manual", query_language: "zh", business_domain: "catalog"}
+
+    - id: "ch_zh_036"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "列出没有直属经理或职位名称中包含 Manager 的员工；返回员工编号、合并后的员工姓名、职位和直属经理编号，按员工编号排列。"
+      ground_truth_sql: |
+        SELECT employee_id,
+               first_name || ' ' || last_name AS employee_name,
+               title, reports_to
+        FROM public.employee
+        WHERE reports_to IS NULL OR title ILIKE '%Manager%'
+        ORDER BY employee_id;
+      expected_schema: {tables: ["public.employee"]}
+      expected_sql_contract:
+        required_features: ["where", "order_by"]
+        required_columns: ["employee_id", "first_name", "last_name", "title", "reports_to"]
+        required_filter_columns: ["reports_to", "title"]
+        max_projection_count: 4
+      tags: ["filtering", "null_handling", "text_filter", "multi_condition", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "filtering", source: "manual", query_language: "zh", business_domain: "employee"}
+
+    - id: "ch_zh_037"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "分别找出 2024 年金额不少于 10 的高金额账单和金额低于 2 的低金额账单，再合并两个结果集；返回账单编号、日期、金额和金额层级，按层级、日期、账单编号排列。"
+      ground_truth_sql: |
+        SELECT invoice_id, invoice_date::date AS invoice_date, total,
+               '高金额' AS amount_tier
+        FROM public.invoice
+        WHERE invoice_date >= DATE '2024-01-01'
+          AND invoice_date < DATE '2025-01-01'
+          AND total >= 10
+        UNION ALL
+        SELECT invoice_id, invoice_date::date AS invoice_date, total,
+               '低金额' AS amount_tier
+        FROM public.invoice
+        WHERE invoice_date >= DATE '2024-01-01'
+          AND invoice_date < DATE '2025-01-01'
+          AND total < 2
+        ORDER BY amount_tier, invoice_date, invoice_id;
+      expected_schema: {tables: ["public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2, temporal_granularity: "date"}
+      expected_sql_contract:
+        required_features: ["where", "order_by"]
+        required_columns: ["invoice_id", "invoice_date", "total"]
+        required_filter_columns: ["invoice_date", "total"]
+        max_projection_count: 4
+      tags: ["filtering", "set_operation", "date_filter", "numeric_filter", "multi_condition", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "filtering", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "ch_zh_038"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "统计 2023 年和 2024 年每个季度的订单数和销售总额；返回年份、季度、订单数和销售总额，按年份、季度排列。"
+      ground_truth_sql: |
+        SELECT EXTRACT(YEAR FROM invoice_date)::int AS sales_year,
+               EXTRACT(QUARTER FROM invoice_date)::int AS sales_quarter,
+               COUNT(*) AS invoice_count,
+               SUM(total) AS sales_total
+        FROM public.invoice
+        WHERE invoice_date >= DATE '2023-01-01'
+          AND invoice_date < DATE '2025-01-01'
+        GROUP BY EXTRACT(YEAR FROM invoice_date), EXTRACT(QUARTER FROM invoice_date)
+        ORDER BY sales_year, sales_quarter;
+      expected_schema: {tables: ["public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "where", "group_by", "order_by"]
+        required_columns: ["invoice_date", "total"]
+        required_filter_columns: ["invoice_date"]
+        max_projection_count: 4
+      tags: ["aggregation", "time_series", "date_filter", "group_by", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "time_series", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "ch_zh_039"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "计算 2024 年每个月的销售总额、上个月销售总额和环比变化额；第一个月的上月金额和变化额保留为空，按月份排列。"
+      ground_truth_sql: |
+        WITH monthly_sales AS (
+          SELECT DATE_TRUNC('month', invoice_date)::date AS sales_month,
+                 SUM(total) AS sales_total
+          FROM public.invoice
+          WHERE invoice_date >= DATE '2024-01-01'
+            AND invoice_date < DATE '2025-01-01'
+          GROUP BY DATE_TRUNC('month', invoice_date)
+        ), with_previous AS (
+          SELECT sales_month, sales_total,
+                 LAG(sales_total) OVER (ORDER BY sales_month) AS previous_month_sales
+          FROM monthly_sales
+        )
+        SELECT sales_month, sales_total, previous_month_sales,
+               sales_total - previous_month_sales AS sales_change
+        FROM with_previous
+        ORDER BY sales_month;
+      expected_schema: {tables: ["public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "cte", "window", "where", "group_by", "order_by"]
+        required_columns: ["invoice_date", "total"]
+        required_filter_columns: ["invoice_date"]
+        max_projection_count: 4
+      tags: ["aggregation", "time_series", "date_filter", "window", "cte", "null_handling", "ordering"]
+      difficulty: "hard"
+      metadata: {category: "time_series", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "ch_zh_040"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "按客户首次下单年份统计新增客户数；返回首次下单年份和新增客户数，按年份排列。"
+      ground_truth_sql: |
+        WITH first_orders AS (
+          SELECT customer_id, MIN(invoice_date) AS first_invoice_date
+          FROM public.invoice
+          GROUP BY customer_id
+        )
+        SELECT EXTRACT(YEAR FROM first_invoice_date)::int AS first_order_year,
+               COUNT(*) AS new_customer_count
+        FROM first_orders
+        GROUP BY EXTRACT(YEAR FROM first_invoice_date)
+        ORDER BY first_order_year;
+      expected_schema: {tables: ["public.invoice"]}
+      expected_sql_contract:
+        required_features: ["aggregation", "cte", "group_by", "order_by"]
+        required_columns: ["customer_id", "invoice_date"]
+        max_projection_count: 2
+      tags: ["aggregation", "time_series", "cte", "group_by", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "time_series", source: "manual", query_language: "zh", business_domain: "customer"}
+
+    - id: "ch_zh_041"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "统计 2022 到 2024 年每位销售支持员工每年的订单数和销售总额；返回年份、员工编号、员工姓名、订单数和销售总额，按年份、员工编号排列。"
+      ground_truth_sql: |
+        SELECT EXTRACT(YEAR FROM i.invoice_date)::int AS sales_year,
+               e.employee_id,
+               e.first_name || ' ' || e.last_name AS employee_name,
+               COUNT(DISTINCT i.invoice_id) AS invoice_count,
+               SUM(i.total) AS sales_total
+        FROM public.employee AS e
+        JOIN public.customer AS c ON c.support_rep_id = e.employee_id
+        JOIN public.invoice AS i ON i.customer_id = c.customer_id
+        WHERE i.invoice_date >= DATE '2022-01-01'
+          AND i.invoice_date < DATE '2025-01-01'
+        GROUP BY EXTRACT(YEAR FROM i.invoice_date),
+                 e.employee_id, e.first_name, e.last_name
+        ORDER BY sales_year, e.employee_id;
+      expected_schema: {tables: ["public.employee", "public.customer", "public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "distinct", "join", "where", "group_by", "order_by"]
+        required_columns: ["employee_id", "support_rep_id", "customer_id", "invoice_id", "invoice_date", "total"]
+        required_filter_columns: ["invoice_date"]
+        max_projection_count: 5
+      tags: ["aggregation", "time_series", "date_filter", "distinct", "join", "multi_table", "group_by", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "time_series", source: "manual", query_language: "zh", business_domain: "employee"}
+
+    - id: "ch_zh_042"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "列出每位客户及其销售支持员工，并统计客户的订单数和累计消费金额；返回客户编号、客户姓名、员工编号、员工姓名、订单数和消费金额，按客户编号排列。"
+      ground_truth_sql: |
+        SELECT c.customer_id,
+               c.first_name || ' ' || c.last_name AS customer_name,
+               e.employee_id,
+               e.first_name || ' ' || e.last_name AS employee_name,
+               COUNT(i.invoice_id) AS invoice_count,
+               COALESCE(SUM(i.total), 0) AS sales_total
+        FROM public.customer AS c
+        JOIN public.employee AS e ON e.employee_id = c.support_rep_id
+        LEFT JOIN public.invoice AS i ON i.customer_id = c.customer_id
+        GROUP BY c.customer_id, c.first_name, c.last_name,
+                 e.employee_id, e.first_name, e.last_name
+        ORDER BY c.customer_id;
+      expected_schema: {tables: ["public.customer", "public.employee", "public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "join", "group_by", "order_by"]
+        required_columns: ["customer_id", "support_rep_id", "employee_id", "invoice_id", "total"]
+        max_projection_count: 6
+      tags: ["aggregation", "join", "multi_table", "null_handling", "group_by", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "join", source: "manual", query_language: "zh", business_domain: "employee"}
+
+    - id: "ch_zh_043"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "按客户所在国家或地区统计客户数、订单数和销售总额；返回国家或地区、不同客户数、不同订单数和销售总额，按销售总额从高到低排列。"
+      ground_truth_sql: |
+        SELECT c.country,
+               COUNT(DISTINCT c.customer_id) AS customer_count,
+               COUNT(DISTINCT i.invoice_id) AS invoice_count,
+               SUM(i.total) AS sales_total
+        FROM public.customer AS c
+        JOIN public.invoice AS i ON i.customer_id = c.customer_id
+        GROUP BY c.country
+        ORDER BY sales_total DESC, c.country;
+      expected_schema: {tables: ["public.customer", "public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "distinct", "join", "group_by", "order_by"]
+        required_columns: ["country", "customer_id", "invoice_id", "total"]
+        max_projection_count: 4
+      tags: ["aggregation", "distinct", "join", "multi_table", "group_by", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "join", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "ch_zh_044"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "统计每种媒体类型的目录曲目数、有销售记录的不同曲目数和销售收入；没有销售时收入显示 0，按媒体类型编号排列。"
+      ground_truth_sql: |
+        SELECT mt.media_type_id, mt.name AS media_type_name,
+               COUNT(DISTINCT t.track_id) AS catalog_track_count,
+               COUNT(DISTINCT il.track_id) AS sold_track_count,
+               COALESCE(SUM(il.unit_price * il.quantity), 0) AS sales_revenue
+        FROM public.media_type AS mt
+        LEFT JOIN public.track AS t ON t.media_type_id = mt.media_type_id
+        LEFT JOIN public.invoice_line AS il ON il.track_id = t.track_id
+        GROUP BY mt.media_type_id, mt.name
+        ORDER BY mt.media_type_id;
+      expected_schema: {tables: ["public.media_type", "public.track", "public.invoice_line"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "distinct", "join", "group_by", "order_by"]
+        required_columns: ["media_type_id", "track_id", "unit_price", "quantity"]
+        max_projection_count: 5
+      tags: ["aggregation", "distinct", "join", "multi_table", "null_handling", "group_by", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "join", source: "manual", query_language: "zh", business_domain: "catalog"}
+
+    - id: "ch_zh_045"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "哪些客户国家或地区至少有 3 名客户？返回国家或地区和客户数，按客户数从高到低、国家或地区名称排列。"
+      ground_truth_sql: |
+        SELECT country, COUNT(*) AS customer_count
+        FROM public.customer
+        GROUP BY country
+        HAVING COUNT(*) >= 3
+        ORDER BY customer_count DESC, country;
+      expected_schema: {tables: ["public.customer"]}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "having", "order_by"]
+        required_columns: ["country"]
+        max_projection_count: 2
+      tags: ["aggregation", "having", "group_by", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "customer"}
+
+    - id: "ch_zh_046"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "哪些账单城市至少有 10 笔订单？返回城市、订单数、销售总额和平均客单价，按销售总额从高到低、城市名称排列。"
+      ground_truth_sql: |
+        SELECT billing_city,
+               COUNT(*) AS invoice_count,
+               SUM(total) AS sales_total,
+               AVG(total) AS average_invoice_value
+        FROM public.invoice
+        GROUP BY billing_city
+        HAVING COUNT(*) >= 10
+        ORDER BY sales_total DESC, billing_city;
+      expected_schema: {tables: ["public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "group_by", "having", "order_by"]
+        required_columns: ["billing_city", "total"]
+        max_projection_count: 4
+      tags: ["aggregation", "having", "group_by", "ordering"]
+      difficulty: "easy"
+      metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "ch_zh_047"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "2024 年销售总额最高的 5 个账单城市是哪些？返回城市、订单数和销售总额；金额并列时按城市名称排列。"
+      ground_truth_sql: |
+        SELECT billing_city,
+               COUNT(*) AS invoice_count,
+               SUM(total) AS sales_total
+        FROM public.invoice
+        WHERE invoice_date >= DATE '2024-01-01'
+          AND invoice_date < DATE '2025-01-01'
+        GROUP BY billing_city
+        ORDER BY sales_total DESC, billing_city
+        LIMIT 5;
+      expected_schema: {tables: ["public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "where", "group_by", "order_by", "limit"]
+        required_columns: ["billing_city", "invoice_date", "total"]
+        required_filter_columns: ["invoice_date"]
+        max_projection_count: 3
+      tags: ["aggregation", "topk", "date_filter", "group_by", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "topk", source: "manual", query_language: "zh", business_domain: "sales"}
+
+    - id: "ch_zh_048"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "2024 年销售额最高的 3 位销售支持员工是谁？返回员工编号、合并后的员工姓名、不同客户数、订单数和销售总额；金额并列时按员工编号排列。"
+      ground_truth_sql: |
+        SELECT e.employee_id,
+               e.first_name || ' ' || e.last_name AS employee_name,
+               COUNT(DISTINCT c.customer_id) AS customer_count,
+               COUNT(DISTINCT i.invoice_id) AS invoice_count,
+               SUM(i.total) AS sales_total
+        FROM public.employee AS e
+        JOIN public.customer AS c ON c.support_rep_id = e.employee_id
+        JOIN public.invoice AS i ON i.customer_id = c.customer_id
+        WHERE i.invoice_date >= DATE '2024-01-01'
+          AND i.invoice_date < DATE '2025-01-01'
+        GROUP BY e.employee_id, e.first_name, e.last_name
+        ORDER BY sales_total DESC, e.employee_id
+        LIMIT 3;
+      expected_schema: {tables: ["public.employee", "public.customer", "public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "distinct", "join", "where", "group_by", "order_by", "limit"]
+        required_columns: ["employee_id", "support_rep_id", "customer_id", "invoice_id", "invoice_date", "total"]
+        required_filter_columns: ["invoice_date"]
+        max_projection_count: 5
+      tags: ["aggregation", "topk", "date_filter", "distinct", "join", "multi_table", "group_by", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "topk", source: "manual", query_language: "zh", business_domain: "employee"}
+
+    - id: "ch_zh_049"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "哪些曲目的单价高于其所属媒体类型的平均曲目单价？返回曲目编号、曲目名称、媒体类型、曲目单价和该媒体类型平均单价，按媒体类型、曲目单价从高到低、曲目编号排列。"
+      ground_truth_sql: |
+        SELECT t.track_id, t.name AS track_name,
+               mt.name AS media_type_name, t.unit_price,
+               averages.media_type_average_price
+        FROM public.track AS t
+        JOIN public.media_type AS mt ON mt.media_type_id = t.media_type_id
+        JOIN (
+          SELECT media_type_id, AVG(unit_price) AS media_type_average_price
+          FROM public.track
+          GROUP BY media_type_id
+        ) AS averages ON averages.media_type_id = t.media_type_id
+        WHERE t.unit_price > averages.media_type_average_price
+        ORDER BY mt.name, t.unit_price DESC, t.track_id;
+      expected_schema: {tables: ["public.track", "public.media_type"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "subquery", "join", "where", "order_by"]
+        required_columns: ["track_id", "media_type_id", "unit_price"]
+        required_filter_columns: ["unit_price"]
+        max_projection_count: 5
+      tags: ["aggregation", "subquery", "comparison", "join", "multi_table", "ordering"]
+      difficulty: "medium"
+      metadata: {category: "subquery", source: "manual", query_language: "zh", business_domain: "catalog"}
+
+    - id: "ch_zh_050"
+      database_id: "chinook"
+      dialect: "postgres"
+      query: "找出每个客户国家或地区累计消费金额最高的 2 位客户；返回国家或地区、客户编号、合并后的客户姓名、消费金额和国家内排名，金额并列时按客户编号从小到大排列。"
+      ground_truth_sql: |
+        WITH customer_sales AS (
+          SELECT c.country, c.customer_id,
+                 c.first_name || ' ' || c.last_name AS customer_name,
+                 SUM(i.total) AS sales_total
+          FROM public.customer AS c
+          JOIN public.invoice AS i ON i.customer_id = c.customer_id
+          GROUP BY c.country, c.customer_id, c.first_name, c.last_name
+        ), ranked AS (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY country ORDER BY sales_total DESC, customer_id
+          ) AS country_rank
+          FROM customer_sales
+        )
+        SELECT country, customer_id, customer_name, sales_total, country_rank
+        FROM ranked
+        WHERE country_rank <= 2
+        ORDER BY country, country_rank, customer_id;
+      expected_schema: {tables: ["public.customer", "public.invoice"]}
+      result_comparison: {numeric_decimal_places: 2}
+      expected_sql_contract:
+        required_features: ["aggregation", "cte", "window", "join", "where", "group_by", "order_by"]
+        required_columns: ["country", "customer_id", "total"]
+        max_projection_count: 5
+      tags: ["aggregation", "window", "ranking", "topk", "cte", "join", "multi_table", "ordering"]
+      difficulty: "hard"
+      metadata: {category: "window", source: "manual", query_language: "zh", business_domain: "customer"}

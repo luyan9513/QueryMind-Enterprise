@@ -73,6 +73,20 @@ def resolve_agent_temperature() -> float:
     return value
 
 
+def resolve_postgres_schemas() -> list[str]:
+    """Resolve PostgreSQL schemas included in extraction for the active source."""
+    default = "person,humanresources,production,purchasing,sales"
+    raw_value = os.getenv("EVAL_POSTGRES_SCHEMAS", default)
+    schemas: list[str] = []
+    for item in raw_value.split(","):
+        schema_name = item.strip()
+        if schema_name and schema_name not in schemas:
+            schemas.append(schema_name)
+    if not schemas:
+        raise ValueError("EVAL_POSTGRES_SCHEMAS must include at least one schema")
+    return schemas
+
+
 def resolve_evaluation_mode(value: str | None = None) -> EvaluationMode:
     """Resolve the isolated S0/S1/S2/S3 strategy from CLI or environment."""
     return parse_evaluation_mode(value or os.getenv("EVAL_MODE") or "s2")
@@ -324,6 +338,56 @@ def resolve_evaluation_providers(cli_provider: str | None = None) -> tuple[str, 
     return agent_provider, judge_provider
 
 
+def build_sql_runner_from_env() -> tuple[str, str, object]:
+    """Build only the configured SQL runner, without LLM or schema services."""
+    database_id = os.getenv("EVAL_DATABASE_ID", "adventureworks")
+    dialect = os.getenv("EVAL_DB_DIALECT", "postgres").lower()
+
+    if dialect == "sqlite":
+        from QueryMind.integrations.sqlrunner import SqliteRunner
+
+        if not os.getenv("EVAL_SQLITE_DATABASE_PATH"):
+            raise ValueError("EVAL_SQLITE_DATABASE_PATH is required for sqlite")
+        database_path = resolve_env_path(
+            "EVAL_SQLITE_DATABASE_PATH",
+            REPO_ROOT / "evaluation.sqlite",
+        )
+        sql_runner = SqliteRunner(database_path=database_path)
+    elif dialect == "mssql":
+        from QueryMind.integrations.sqlrunner import MSSQLRunner
+
+        odbc_conn_str = os.getenv("EVAL_MSSQL_ODBC_CONN_STR")
+        if not odbc_conn_str:
+            raise ValueError("EVAL_MSSQL_ODBC_CONN_STR is required for mssql")
+        sql_runner = MSSQLRunner(odbc_conn_str=odbc_conn_str)
+    else:
+        from QueryMind.integrations.sqlrunner import PostgresRunner
+
+        connection_string = os.getenv("EVAL_POSTGRES_CONNECTION_STRING")
+        if connection_string:
+            sql_runner = PostgresRunner(connection_string=connection_string)
+        else:
+            host = os.getenv("EVAL_POSTGRES_HOST", "localhost")
+            port = int(os.getenv("EVAL_POSTGRES_PORT", "5432"))
+            database = os.getenv("EVAL_POSTGRES_DATABASE")
+            user = os.getenv("EVAL_POSTGRES_USER")
+            password = os.getenv("EVAL_POSTGRES_PASSWORD")
+            if not database or not user:
+                raise ValueError(
+                    "EVAL_POSTGRES_DATABASE and EVAL_POSTGRES_USER are required "
+                    "for postgres"
+                )
+            sql_runner = PostgresRunner(
+                host=host,
+                port=port,
+                database=database,
+                user=user,
+                password=password,
+            )
+
+    return database_id, dialect, sql_runner
+
+
 def build_runtime_from_env(
     provider: str | None = None,
     evaluation_mode: str | EvaluationMode | None = None,
@@ -381,7 +445,7 @@ def build_runtime_from_env(
     )
     require_query_plan = query_plan_mode != QueryPlanMode.DISABLED
     agent_temperature = resolve_agent_temperature()
-    business_schemas = ["person", "humanresources", "production", "purchasing", "sales"]
+    business_schemas = resolve_postgres_schemas()
 
     neo4j_config = Neo4jConfig.from_env()
     mem0_config = Mem0VectorConfig.from_env()

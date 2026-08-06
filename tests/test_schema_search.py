@@ -86,6 +86,63 @@ def test_hybrid_search_tolerates_graph_expansion_failure() -> None:
     assert results[0].source == "vector"
 
 
+def test_rrf_keeps_same_schema_table_from_different_databases_separate() -> None:
+    search = SchemaSearch(_VectorStore(), _GraphStore())
+    vector_results = [
+        VectorSearchResult(
+            table_name="orders",
+            schema_name="public",
+            database_name=database_name,
+            memory_id=f"{database_name}-orders",
+            score=0.9,
+            metadata={"database_name": database_name},
+        )
+        for database_name in ("source_a", "source_b")
+    ]
+
+    results = search._rrf_fusion(vector_results, [])
+
+    assert [(item.database_name, item.table_name) for item in results] == [
+        ("source_a", "orders"),
+        ("source_b", "orders"),
+    ]
+
+
+def test_hybrid_search_scopes_vector_and_graph_to_active_database() -> None:
+    class _CapturingVectorStore:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def search_by_query(self, **kwargs):
+            self.calls.append(kwargs)
+            return [
+                VectorSearchResult(
+                    table_name="orders",
+                    schema_name="public",
+                    database_name="source_b",
+                    memory_id="source-b-orders",
+                    score=0.9,
+                    metadata={"database_name": "source_b"},
+                )
+            ]
+
+    vector_store = _CapturingVectorStore()
+    graph_store = _GraphStore()
+    search = SchemaSearch(vector_store, graph_store)
+
+    results = asyncio.run(
+        search.search_hybrid(
+            "orders",
+            database_name="source_b",
+            limit=10,
+        )
+    )
+
+    assert vector_store.calls[0]["database_name_filter"] == "source_b"
+    assert graph_store.calls[0]["database_name"] == "source_b"
+    assert all(item.database_name == "source_b" for item in results)
+
+
 def test_required_fields_strip_qualifiers_and_prioritize_broad_coverage() -> None:
     class _FieldGraphStore:
         def __init__(self) -> None:
@@ -220,3 +277,34 @@ def test_graph_only_search_hydrates_the_complete_table_schema() -> None:
     assert [
         field.field_name for field in results[0].table_schema.field_definitions
     ] == ["order_id", "orderdate"]
+
+
+def test_direct_graph_api_uses_request_database_scope() -> None:
+    class _ScopedGraphStore:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def find_related_tables(self, **kwargs):
+            self.calls.append(kwargs)
+            return []
+
+    graph_store = _ScopedGraphStore()
+    memory = object.__new__(Neo4jMem0SchemaMemory)
+    memory._neo4j_store = graph_store
+    context = ToolContext(
+        user=User(
+            id="u1",
+            username="tester",
+            email="tester@example.com",
+            group_memberships=["user"],
+        ),
+        conversation_id="conv-source-b",
+        request_id="req-source-b",
+        agent_memory=NoOpAgentMemory(),
+        metadata={"database_id": "source_b"},
+    )
+
+    results = asyncio.run(memory.find_related_tables("orders", context))
+
+    assert results == []
+    assert graph_store.calls[0]["database_name"] == "source_b"

@@ -15,6 +15,14 @@ from .base import (
     ToolInvocationRecord,
 )
 from .dataset import EvaluationDataset
+from .benchmark_admission import (
+    BenchmarkAdmissionAssessment,
+    BenchmarkAdmissionProfile,
+    BenchmarkCoverageDeficit,
+    BenchmarkQualityThresholds,
+    assess_benchmark_admission,
+    load_benchmark_admission_profile,
+)
 from .evaluators import SqlAccuracyEvaluator
 from .mode import EvaluationMode, parse_evaluation_mode
 from .outcome import ExpectedOutcomeEvaluator
@@ -32,6 +40,10 @@ from .runtime import (
 
 __all__ = [
     "AgentResult",
+    "BenchmarkAdmissionAssessment",
+    "BenchmarkAdmissionProfile",
+    "BenchmarkCoverageDeficit",
+    "BenchmarkQualityThresholds",
     "EvaluationDataset",
     "EvaluationResult",
     "EvaluationMode",
@@ -60,4 +72,6 @@ __all__ = [
     "ValidationIssue",
     "ToolInvocationRecord",
     "parse_evaluation_mode",
+    "assess_benchmark_admission",
+    "load_benchmark_admission_profile",
 ]

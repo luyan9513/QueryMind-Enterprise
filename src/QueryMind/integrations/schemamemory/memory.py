@@ -138,6 +138,20 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
             "agent_id": self._default_agent_id,
             "run_id": context.conversation_id if context else None,
         }
+
+    @staticmethod
+    def _get_database_name(
+        context: Optional["ToolContext"],
+        database_name: Optional[str] = None,
+    ) -> Optional[str]:
+        """Resolve an explicit or request-scoped database identity."""
+        if database_name:
+            return database_name
+        if context and context.metadata:
+            value = context.metadata.get("database_id")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
     
     def _build_search_result(
         self,
@@ -350,6 +364,7 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
         limit: int = 10,
         similarity_threshold: float = 0.3,
         domain_filter: Optional[str] = None,
+        database_name: Optional[str] = None,
     ) -> List["SchemaSearchResult"]:
         """
         Search tables by business query (vector search only).
@@ -365,6 +380,7 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
             List of SchemaSearchResult
         """
         entities = self._get_entity_ids(context)
+        database_name = self._get_database_name(context, database_name)
         
         vector_results = await self._vector_store.search_by_query(
             query=query,
@@ -373,6 +389,11 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
             limit=limit,
             threshold=similarity_threshold,
             domain_filter=domain_filter,
+            **(
+                {"database_name_filter": database_name}
+                if database_name
+                else {}
+            ),
         )
         
         # Convert to SchemaSearchResult
@@ -384,6 +405,7 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
                 table_data = await self._neo4j_store.get_table_schema(
                     table_name=vr.table_name,
                     schema_name=vr.schema_name,
+                    database_name=database_name or vr.database_name,
                 )
             
             fusion_result = FusionResult(
@@ -394,6 +416,7 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
                 fusion_score=vr.score,
                 rank=rank + 1,
                 source="vector",
+                database_name=database_name or vr.database_name,
             )
             
             results.append(self._build_search_result(fusion_result, table_data))
@@ -450,10 +473,12 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
         if not self._neo4j_store:
             return []
         
+        database_name = self._get_database_name(context)
         graph_results = await self._neo4j_store.find_related_tables(
             table_name=table_name,
             max_hops=max_hops,
             relationship_types=relationship_types,
+            database_name=database_name,
         )
         
         results = []
@@ -466,6 +491,7 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
                 fusion_score=1.0 / (gr.get("hops", 0) + 1),
                 rank=rank + 1,
                 source="graph",
+                database_name=database_name,
             )
             
             results.append(self._build_search_result(fusion_result, gr))
@@ -511,6 +537,7 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
         domain_filter: Optional[str] = None,
         required_fields: Optional[List[str]] = None,
         seed_tables: Optional[List[str]] = None,
+        database_name: Optional[str] = None,
     ) -> List["SchemaSearchResult"]:
         """
         Search for relevant table schemas using various retrieval modes.
@@ -543,6 +570,8 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
             >>> # Graph expansion from seed tables
             >>> results = await memory.search_schema("orders", context, search_mode="expand")
         """
+        database_name = self._get_database_name(context, database_name)
+
         if search_mode == "vector_only":
             return await self.search_by_business_query(
                 query=query,
@@ -550,6 +579,7 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
                 limit=limit,
                 similarity_threshold=similarity_threshold,
                 domain_filter=domain_filter,
+                database_name=database_name,
             )
         
         if search_mode == "graph_only":
@@ -558,11 +588,13 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
                     graph_results = await self._hybrid_search._search_graph_by_fields(
                         field_names=required_fields,
                         domain_filter=domain_filter,
+                        database_name=database_name,
                     ) if self._hybrid_search else []
                 elif domain_filter:
                     graph_results = await self._neo4j_store.find_tables_by_domain(
                         domain=domain_filter,
                         limit=limit,
+                        **({"database_name": database_name} if database_name else {}),
                     )
                 else:
                     return []
@@ -574,6 +606,7 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
                     fusion_result = FusionResult(
                         table_name=table_name,
                         schema_name=schema_name,
+                        database_name=database_name,
                         vector_score=None,
                         graph_score=1.0,
                         fusion_score=1.0,
@@ -583,6 +616,7 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
                     table_data = await self._neo4j_store.get_table_schema(
                         table_name=table_name,
                         schema_name=schema_name,
+                        database_name=database_name,
                     )
                     results.append(
                         self._build_search_result(fusion_result, table_data)
@@ -616,6 +650,7 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
                     limit=5,
                     similarity_threshold=similarity_threshold,
                     domain_filter=domain_filter,
+                    database_name=database_name,
                 )
                 seed_tables = [r.table_schema.full_name for r in vector_results if r.table_schema]
             
@@ -623,6 +658,7 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
                 fusion_results = await self._hybrid_search.expand_by_graph(
                     seed_tables=seed_tables,
                     limit=limit,
+                    database_name=database_name,
                 )
                 
                 results = []
@@ -630,6 +666,7 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
                     table_data = await self._neo4j_store.get_table_schema(
                         table_name=fr.table_name,
                         schema_name=fr.schema_name,
+                        database_name=database_name or fr.database_name,
                     ) if self._neo4j_store else None
                     results.append(self._build_search_result(fr, table_data))
                 return results
@@ -643,6 +680,7 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
                 threshold=similarity_threshold,
                 domain_filter=domain_filter,
                 required_fields=required_fields,
+                database_name=database_name,
             )
             
             results = []
@@ -650,6 +688,7 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
                 table_data = await self._neo4j_store.get_table_schema(
                     table_name=fr.table_name,
                     schema_name=fr.schema_name,
+                    database_name=database_name or fr.database_name,
                 ) if self._neo4j_store else None
                 results.append(self._build_search_result(fr, table_data))
             return results
@@ -661,6 +700,7 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
             limit=limit,
             similarity_threshold=similarity_threshold,
             domain_filter=domain_filter,
+            database_name=database_name,
         )
     
     async def get_table_schema(
@@ -682,6 +722,7 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
         Returns:
             TableSchema or None if not found
         """
+        database_name = self._get_database_name(context, database_name)
         if self._neo4j_store:
             table_data = await self._neo4j_store.get_table_schema(
                 table_name=table_name,
@@ -772,6 +813,7 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
         table_name: str,
         context: "ToolContext",
         schema_name: str = "public",
+        database_name: Optional[str] = None,
     ) -> bool:
         """
         Delete a table schema.
@@ -784,7 +826,10 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
         Returns:
             True if deleted
         """
-        full_name = f"{schema_name}.{table_name}"
+        database_name = self._get_database_name(context, database_name)
+        full_name = ".".join(
+            filter(None, [database_name, schema_name, table_name])
+        )
         
         # Delete from vector store. Prefer the in-memory map, but fall back to a
         # direct Mem0 lookup so legacy tables created before a restart still work.
@@ -793,6 +838,7 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
             vector_id = await self._vector_store.get_memory_id(
                 table_name=table_name,
                 schema_name=schema_name,
+                database_name=database_name,
                 user_id=self._default_user_id,
             )
             if vector_id:
@@ -809,6 +855,7 @@ class Neo4jMem0SchemaMemory(SchemaMemory):
             return await self._neo4j_store.delete_table_schema(
                 table_name=table_name,
                 schema_name=schema_name,
+                database_name=database_name,
             )
         
         return True

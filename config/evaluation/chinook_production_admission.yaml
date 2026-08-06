@@ -1,0 +1,42 @@
+profile:
+  name: "Chinook production-candidate benchmark admission v0.9"
+  database_id: "chinook"
+  minimum_cases: 100
+  required_repeats: 3
+  minimum_by_difficulty:
+    easy: 30
+    medium: 40
+    hard: 30
+  minimum_by_category:
+    aggregation: 20
+    join: 20
+    topk: 15
+    time_series: 15
+    window: 10
+    subquery: 10
+    comparison: 5
+    filtering: 5
+  minimum_by_business_domain:
+    catalog: 30
+    sales: 30
+    customer: 25
+    employee: 15
+  minimum_by_tag:
+    multi_table: 30
+    window: 15
+    subquery: 15
+    date_filter: 15
+    null_handling: 10
+    distinct: 10
+    having: 10
+    topk: 15
+    case_when: 10
+    set_operation: 5
+  quality_thresholds:
+    reference_sql_success_rate: 1.0
+    schema_recall: 0.9
+    business_accuracy: 0.8
+    wrong_executed_rate: 0.1
+    automatic_answer_coverage: 0.85
+    p95_agent_execution_time_ms: 30000
+    repeat_consistency_rate: 0.85

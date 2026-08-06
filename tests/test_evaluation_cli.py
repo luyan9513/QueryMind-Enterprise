@@ -9,8 +9,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from QueryMind.evaluation_cli import (  # noqa: E402
     _pricing_snapshot,
     build_evaluator_names,
+    select_test_cases,
+    selected_dataset_hash,
     should_include_expected_outcome,
 )
+from QueryMind.core.evaluation import EvaluationDataset  # noqa: E402
 
 
 def test_build_evaluator_names_supports_sql_accuracy_only() -> None:
@@ -46,3 +49,34 @@ def test_pricing_snapshot_requires_complete_explicit_prices(monkeypatch) -> None
     assert snapshot["model"] == "demo"
     assert snapshot["output_usd_per_million"] == 2.0
     assert snapshot["checked_at"] == "2026-07-15"
+
+
+def test_select_test_cases_preserves_requested_order_and_rejects_unknown() -> None:
+    dataset = EvaluationDataset(
+        name="demo",
+        test_cases=[
+            SimpleNamespace(id="case_a"),
+            SimpleNamespace(id="case_b"),
+        ],
+    )
+
+    selected = select_test_cases(dataset, ["case_b", "case_a", "case_b"])
+
+    assert [case.id for case in selected.test_cases] == ["case_b", "case_a"]
+    try:
+        select_test_cases(dataset, ["missing"])
+    except ValueError as exc:
+        assert "missing" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("unknown case IDs should fail")
+
+
+def test_selected_dataset_hash_separates_targeted_runs(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "dataset.yaml"
+    dataset_path.write_text("dataset: {}\n", encoding="utf-8")
+
+    full_hash = selected_dataset_hash(dataset_path, None)
+    smoke_hash = selected_dataset_hash(dataset_path, ["case_a"])
+
+    assert smoke_hash != full_hash
+    assert selected_dataset_hash(dataset_path, ["case_a"]) == smoke_hash

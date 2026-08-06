@@ -134,8 +134,9 @@ class Neo4jGraphStore:
     
     # Cypher query templates
     CREATE_CONSTRAINTS = [
-        "CREATE CONSTRAINT table_name_unique IF NOT EXISTS "
-        "FOR (t:Table) REQUIRE (t.table_name, t.schema_name) IS UNIQUE",
+        "CREATE CONSTRAINT table_source_name_unique IF NOT EXISTS "
+        "FOR (t:Table) REQUIRE "
+        "(t.database_name, t.schema_name, t.table_name) IS UNIQUE",
     ]
     
     CREATE_INDEXES = [
@@ -188,6 +189,80 @@ class Neo4jGraphStore:
         await asyncio.get_event_loop().run_in_executor(
             None, lambda: self.driver.session().execute_write(_init)
         )
+
+    async def migrate_legacy_database_scope(self) -> Dict[str, int]:
+        """Migrate legacy graph identities without deleting schema nodes.
+
+        This operation is intentionally explicit and is not called by
+        ``initialize``. It verifies that every table already has a database
+        identity and that the new composite key is collision-free before it
+        backfills field identities and removes the legacy table constraint.
+        """
+
+        def _preflight(tx: Transaction) -> Dict[str, int]:
+            missing_database_names = tx.run("""
+                MATCH (t:Table)
+                WHERE t.database_name IS NULL OR t.database_name = ''
+                RETURN count(t) AS count
+            """).single()["count"]
+            duplicate_table_keys = tx.run("""
+                MATCH (t:Table)
+                WITH t.database_name AS database_name,
+                     t.schema_name AS schema_name,
+                     t.table_name AS table_name,
+                     count(*) AS occurrences
+                WHERE occurrences > 1
+                RETURN count(*) AS count
+            """).single()["count"]
+            fields_to_backfill = tx.run("""
+                MATCH (:Table)-[:HAS_FIELD]->(f:Field)
+                WHERE f.database_name IS NULL OR f.database_name = ''
+                RETURN count(DISTINCT f) AS count
+            """).single()["count"]
+            return {
+                "missing_database_names": missing_database_names,
+                "duplicate_table_keys": duplicate_table_keys,
+                "fields_to_backfill": fields_to_backfill,
+            }
+
+        def _backfill_fields(tx: Transaction) -> int:
+            result = tx.run("""
+                MATCH (t:Table)-[:HAS_FIELD]->(f:Field)
+                WHERE f.database_name IS NULL OR f.database_name = ''
+                SET f.database_name = t.database_name
+                RETURN count(DISTINCT f) AS count
+            """).single()
+            return int(result["count"] if result else 0)
+
+        loop = asyncio.get_event_loop()
+        preflight = await loop.run_in_executor(
+            None, lambda: self.driver.session().execute_read(_preflight)
+        )
+        if preflight["missing_database_names"]:
+            raise ValueError(
+                "Cannot migrate schema graph: Table nodes are missing database_name"
+            )
+        if preflight["duplicate_table_keys"]:
+            raise ValueError(
+                "Cannot migrate schema graph: duplicate database/schema/table keys exist"
+            )
+
+        fields_backfilled = await loop.run_in_executor(
+            None, lambda: self.driver.session().execute_write(_backfill_fields)
+        )
+
+        def _migrate_constraints() -> None:
+            with self.driver.session() as session:
+                session.run(self.CREATE_CONSTRAINTS[0]).consume()
+                session.run(
+                    "DROP CONSTRAINT table_name_unique IF EXISTS"
+                ).consume()
+
+        await loop.run_in_executor(None, _migrate_constraints)
+        return {
+            **preflight,
+            "fields_backfilled": fields_backfilled,
+        }
     
     def close(self) -> None:
         """Close the Neo4j driver."""
@@ -224,20 +299,24 @@ class Neo4jGraphStore:
         full_name = self._get_table_full_name(
             schema.schema_name, schema.table_name, schema.database_name
         )
+        database_name = schema.database_name or ""
         
         def _save(tx: Transaction) -> str:
             # 1. Create/merge Table node
             tx.run("""
-                MERGE (t:Table {table_name: $table_name, schema_name: $schema_name})
-                SET t.database_name = $database_name,
-                    t.domain = $domain,
+                MERGE (t:Table {
+                    database_name: $database_name,
+                    table_name: $table_name,
+                    schema_name: $schema_name
+                })
+                SET t.domain = $domain,
                     t.description = $description,
                     t.keywords = $keywords,
                     t.full_name = $full_name
             """, 
                 table_name=schema.table_name,
                 schema_name=schema.schema_name,
-                database_name=schema.database_name,
+                database_name=database_name,
                 domain=schema.business_context.domain,
                 description=schema.business_context.description,
                 keywords=schema.business_context.keywords or [],
@@ -249,21 +328,31 @@ class Neo4jGraphStore:
             # This avoids duplicate table rows when list queries expand
             # over multiple BELONGS_TO_DOMAIN relationships after enrichment.
             tx.run("""
-                MATCH (t:Table {table_name: $table_name, schema_name: $schema_name})
+                MATCH (t:Table {
+                    database_name: $database_name,
+                    table_name: $table_name,
+                    schema_name: $schema_name
+                })
                 OPTIONAL MATCH (t)-[old_rel:BELONGS_TO_DOMAIN]->(:BusinessDomain)
                 DELETE old_rel
             """,
                 table_name=schema.table_name,
                 schema_name=schema.schema_name,
+                database_name=database_name,
             )
 
             if vector_id is not None:
                 tx.run("""
-                    MATCH (t:Table {table_name: $table_name, schema_name: $schema_name})
+                    MATCH (t:Table {
+                        database_name: $database_name,
+                        table_name: $table_name,
+                        schema_name: $schema_name
+                    })
                     SET t.vector_id = $vector_id
                 """,
                     table_name=schema.table_name,
                     schema_name=schema.schema_name,
+                    database_name=database_name,
                     vector_id=vector_id,
                 )
             
@@ -274,12 +363,17 @@ class Neo4jGraphStore:
             
             # 3. Link Table to BusinessDomain
             tx.run("""
-                MATCH (t:Table {table_name: $table_name, schema_name: $schema_name})
+                MATCH (t:Table {
+                    database_name: $database_name,
+                    table_name: $table_name,
+                    schema_name: $schema_name
+                })
                 MATCH (d:BusinessDomain {domain: $domain})
                 MERGE (t)-[:BELONGS_TO_DOMAIN]->(d)
             """, 
                 table_name=schema.table_name,
                 schema_name=schema.schema_name,
+                database_name=database_name,
                 domain=schema.business_context.domain
             )
             
@@ -287,6 +381,7 @@ class Neo4jGraphStore:
             for field in schema.field_definitions:
                 tx.run("""
                     MERGE (f:Field {
+                        database_name: $database_name,
                         field_name: $field_name,
                         table_name: $table_name,
                         schema_name: $schema_name
@@ -299,6 +394,7 @@ class Neo4jGraphStore:
                         f.ordinal_position = $ordinal_position
                 """,
                     field_name=field.field_name,
+                    database_name=database_name,
                     table_name=schema.table_name,
                     schema_name=schema.schema_name,
                     data_type=field.data_type,
@@ -311,12 +407,22 @@ class Neo4jGraphStore:
                 
                 # Link Table to Field
                 tx.run("""
-                    MATCH (t:Table {table_name: $table_name, schema_name: $schema_name})
-                    MATCH (f:Field {field_name: $field_name, table_name: $table_name})
+                    MATCH (t:Table {
+                        database_name: $database_name,
+                        table_name: $table_name,
+                        schema_name: $schema_name
+                    })
+                    MATCH (f:Field {
+                        database_name: $database_name,
+                        field_name: $field_name,
+                        table_name: $table_name,
+                        schema_name: $schema_name
+                    })
                     MERGE (t)-[:HAS_FIELD]->(f)
                 """,
                     table_name=schema.table_name,
                     schema_name=schema.schema_name,
+                    database_name=database_name,
                     field_name=field.field_name
                 )
                 
@@ -324,8 +430,14 @@ class Neo4jGraphStore:
                 if field.is_foreign_key and field.foreign_key:
                     fk = field.foreign_key
                     tx.run("""
-                        MATCH (f:Field {field_name: $field_name, table_name: $table_name, schema_name: $schema_name})
+                        MATCH (f:Field {
+                            database_name: $database_name,
+                            field_name: $field_name,
+                            table_name: $table_name,
+                            schema_name: $schema_name
+                        })
                         MERGE (ref:Field {
+                            database_name: $database_name,
                             field_name: $fk_column,
                             table_name: $fk_table,
                             schema_name: $fk_schema
@@ -333,6 +445,7 @@ class Neo4jGraphStore:
                         MERGE (f)-[:REFERENCES]->(ref)
                     """,
                         field_name=field.field_name,
+                        database_name=database_name,
                         table_name=schema.table_name,
                         schema_name=schema.schema_name,
                         fk_column=fk.column_name,
@@ -353,8 +466,16 @@ class Neo4jGraphStore:
                     schema.schema_name,
                 )
                 tx.run("""
-                    MATCH (from:Table {table_name: $from_table, schema_name: $from_schema})
-                    MERGE (to:Table {table_name: $to_table, schema_name: $to_schema})
+                    MATCH (from:Table {
+                        database_name: $database_name,
+                        table_name: $from_table,
+                        schema_name: $from_schema
+                    })
+                    MERGE (to:Table {
+                        database_name: $database_name,
+                        table_name: $to_table,
+                        schema_name: $to_schema
+                    })
                     MERGE (from)-[r:FK_TO {
                         from_field: $from_field,
                         to_field: $to_field
@@ -362,6 +483,7 @@ class Neo4jGraphStore:
                     SET r.relationship_type = $rel_type,
                         r.description = $description
                 """,
+                    database_name=database_name,
                     from_table=from_table,
                     from_schema=from_schema,
                     to_table=to_table,
@@ -420,6 +542,8 @@ class Neo4jGraphStore:
             records = list(result)
             if not records:
                 return None
+            if database_name is None and len(records) > 1:
+                return None
             
             record = records[0]
             table_node = record["t"]
@@ -446,7 +570,8 @@ class Neo4jGraphStore:
     async def delete_table_schema(
         self,
         table_name: str,
-        schema_name: str = "public"
+        schema_name: str = "public",
+        database_name: Optional[str] = None,
     ) -> bool:
         """
         Delete a table schema from Neo4j.
@@ -454,6 +579,7 @@ class Neo4jGraphStore:
         Args:
             table_name: Table name
             schema_name: Schema name
+            database_name: Database name. Unscoped deletes fail closed when ambiguous.
             
         Returns:
             True if deleted, False if not found
@@ -461,12 +587,20 @@ class Neo4jGraphStore:
         def _delete(tx: Transaction) -> bool:
             result = tx.run("""
                 MATCH (t:Table {table_name: $table_name, schema_name: $schema_name})
+                WHERE $database_name IS NULL OR t.database_name = $database_name
+                WITH collect(t) AS tables
+                WHERE size(tables) = 1
+                UNWIND tables AS t
                 OPTIONAL MATCH (t)-[:HAS_FIELD]->(f:Field)
                 WITH t, collect(DISTINCT f) AS fields
                 FOREACH (field IN fields | DETACH DELETE field)
                 DETACH DELETE t
                 RETURN 1 as deleted
-            """, table_name=table_name, schema_name=schema_name)
+            """,
+                table_name=table_name,
+                schema_name=schema_name,
+                database_name=database_name,
+            )
             
             record = list(result)
             if record:
@@ -484,7 +618,8 @@ class Neo4jGraphStore:
         table_name: str,
         schema_name: str = "public",
         max_hops: int = 2,
-        relationship_types: Optional[List[str]] = None
+        relationship_types: Optional[List[str]] = None,
+        database_name: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Find tables related through FK relationships.
@@ -509,13 +644,18 @@ class Neo4jGraphStore:
                 MATCH path = (start:Table {{table_name: $table_name, schema_name: $schema_name}})
                     -[{rel_pattern}]-(related:Table)
                 WHERE start <> related
+                  AND ($database_name IS NULL OR (
+                      start.database_name = $database_name
+                      AND related.database_name = $database_name
+                  ))
                 WITH related, path, length(path) as hops
                 RETURN related, min(hops) as min_hops, collect(DISTINCT relationships(path)) as rels
                 ORDER BY min_hops
                 LIMIT 20
             """,
                 table_name=table_name,
-                schema_name=schema_name
+                schema_name=schema_name,
+                database_name=database_name,
             )
             
             return [
@@ -535,7 +675,8 @@ class Neo4jGraphStore:
         self,
         field_name: str,
         exact_match: bool = False,
-        limit: int = 10
+        limit: int = 10,
+        database_name: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Find tables by field name.
@@ -552,16 +693,18 @@ class Neo4jGraphStore:
             if exact_match:
                 result = tx.run("""
                     MATCH (t:Table)-[:HAS_FIELD]->(f:Field {field_name: $field_name})
+                    WHERE $database_name IS NULL OR t.database_name = $database_name
                     RETURN t, f
                     LIMIT $limit
-                """, field_name=field_name, limit=limit)
+                """, field_name=field_name, limit=limit, database_name=database_name)
             else:
                 result = tx.run("""
                     MATCH (t:Table)-[:HAS_FIELD]->(f:Field)
                     WHERE toLower(f.field_name) CONTAINS toLower($field_name)
+                      AND ($database_name IS NULL OR t.database_name = $database_name)
                     RETURN t, f
                     LIMIT $limit
-                """, field_name=field_name, limit=limit)
+                """, field_name=field_name, limit=limit, database_name=database_name)
             
             return [
                 {"table": dict(record["t"]), "field": dict(record["f"])}
@@ -575,7 +718,8 @@ class Neo4jGraphStore:
     async def find_tables_by_domain(
         self,
         domain: str,
-        limit: int = 100
+        limit: int = 100,
+        database_name: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Find all tables in a business domain.
@@ -590,10 +734,11 @@ class Neo4jGraphStore:
         def _find(tx: Transaction) -> List[Dict[str, Any]]:
             result = tx.run("""
                 MATCH (t:Table)-[:BELONGS_TO_DOMAIN]->(d:BusinessDomain {domain: $domain})
+                WHERE $database_name IS NULL OR t.database_name = $database_name
                 RETURN t
                 ORDER BY t.table_name
                 LIMIT $limit
-            """, domain=domain, limit=limit)
+            """, domain=domain, limit=limit, database_name=database_name)
             
             return [{"table": dict(record["t"])} for record in result]
         
@@ -605,7 +750,8 @@ class Neo4jGraphStore:
         self,
         domain_filter: Optional[str] = None,
         limit: int = 100,
-        offset: int = 0
+        offset: int = 0,
+        database_name: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         List all tables, optionally filtered by domain.
@@ -622,16 +768,18 @@ class Neo4jGraphStore:
             if domain_filter:
                 result = tx.run("""
                     MATCH (t:Table)-[:BELONGS_TO_DOMAIN]->(d:BusinessDomain {domain: $domain})
+                    WHERE $database_name IS NULL OR t.database_name = $database_name
                     OPTIONAL MATCH (t)-[:HAS_FIELD]->(f:Field)
                     WITH t, head(collect(DISTINCT d)) as d, collect(DISTINCT f) as fields
                     ORDER BY t.schema_name, t.table_name
                     SKIP $offset
                     LIMIT $limit
                     RETURN t, d, fields
-                """, domain=domain_filter, offset=offset, limit=limit)
+                """, domain=domain_filter, offset=offset, limit=limit, database_name=database_name)
             else:
                 result = tx.run("""
                     MATCH (t:Table)
+                    WHERE $database_name IS NULL OR t.database_name = $database_name
                     OPTIONAL MATCH (t)-[:BELONGS_TO_DOMAIN]->(d:BusinessDomain)
                     OPTIONAL MATCH (t)-[:HAS_FIELD]->(f:Field)
                     WITH t, head(collect(DISTINCT d)) as d, collect(DISTINCT f) as fields
@@ -639,7 +787,7 @@ class Neo4jGraphStore:
                     SKIP $offset
                     LIMIT $limit
                     RETURN t, d, fields
-                """, offset=offset, limit=limit)
+                """, offset=offset, limit=limit, database_name=database_name)
             
             return [
                 {
@@ -658,7 +806,8 @@ class Neo4jGraphStore:
         self,
         source_table: str,
         target_table: str,
-        max_hops: int = 3
+        max_hops: int = 3,
+        database_name: Optional[str] = None,
     ) -> Optional[float]:
         """
         Calculate graph-based relevance score between two tables.
@@ -669,6 +818,7 @@ class Neo4jGraphStore:
             source_table: Source table full name
             target_table: Target table full name
             max_hops: Maximum traversal depth
+            database_name: Optional database scope
             
         Returns:
             Score (0-1) or None if not reachable
@@ -694,6 +844,11 @@ class Neo4jGraphStore:
                     -[{rel_pattern}]-
                     (t:Table {table_name: $target_table, schema_name: $target_schema})
                 )
+                WHERE $database_name IS NULL OR (
+                    s.database_name = $database_name
+                    AND t.database_name = $database_name
+                    AND all(node IN nodes(path) WHERE node.database_name = $database_name)
+                )
                 WITH length(path) as hops
                 RETURN 1.0 / (hops + 1) as score
             """,
@@ -701,6 +856,7 @@ class Neo4jGraphStore:
                 source_schema=source_schema,
                 target_table=target_table_name,
                 target_schema=target_schema,
+                database_name=database_name,
             )
             
             records = list(result)

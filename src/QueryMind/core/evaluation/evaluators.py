@@ -311,6 +311,11 @@ async def _execute_sql(
                 if comparison_policy is not None
                 else None
             ),
+            temporal_granularity=(
+                comparison_policy.temporal_granularity
+                if comparison_policy is not None
+                else "exact"
+            ),
         )
         return SqlExecutionArtifact(
             sql_text=sql_text,

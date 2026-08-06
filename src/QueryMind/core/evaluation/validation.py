@@ -146,6 +146,21 @@ class EvaluationDatasetValidator:
                 issues.append(ValidationIssue(path=path, message="Expected list[string]"))
             elif any(not isinstance(item, str) for item in value):
                 issues.append(ValidationIssue(path=path, message="Expected every item to be a string"))
+        elif type_name == "list[list[string]]":
+            if not isinstance(value, list):
+                issues.append(ValidationIssue(path=path, message="Expected list[list[string]]"))
+            elif any(
+                not isinstance(group, list)
+                or not group
+                or any(not isinstance(item, str) or not item.strip() for item in group)
+                for group in value
+            ):
+                issues.append(
+                    ValidationIssue(
+                        path=path,
+                        message="Expected every group to be a non-empty list of strings",
+                    )
+                )
         elif type_name == "object":
             if not isinstance(value, dict):
                 issues.append(ValidationIssue(path=path, message="Expected object"))

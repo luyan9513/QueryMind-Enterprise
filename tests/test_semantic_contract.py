@@ -202,6 +202,43 @@ def test_sql_contract_rejects_incomplete_formula_and_advises_on_alias() -> None:
     assert localized_alias.passed
 
 
+def test_sql_contract_accepts_metric_expression_inside_cte() -> None:
+    accepted = validate_sql_against_semantic_contracts(
+        _plan(),
+        """
+        WITH vendor_totals AS (
+            SELECT vendorid,
+                   SUM(subtotal + taxamt + freight) AS purchase_total
+            FROM purchasing.purchaseorderheader
+            GROUP BY vendorid
+        )
+        SELECT vendorid, purchase_total
+        FROM vendor_totals
+        ORDER BY purchase_total DESC
+        """,
+        _snapshot(),
+        mode="required",
+        dialect="postgres",
+    )
+    assert accepted.passed
+
+
+def test_sql_contract_accepts_metric_expression_inside_display_wrapper() -> None:
+    accepted = validate_sql_against_semantic_contracts(
+        _plan(),
+        """
+        SELECT vendorid,
+               ROUND(SUM(subtotal + taxamt + freight)::numeric, 2) AS purchase_total
+        FROM purchasing.purchaseorderheader
+        GROUP BY vendorid
+        """,
+        _snapshot(),
+        mode="required",
+        dialect="postgres",
+    )
+    assert accepted.passed
+
+
 def test_required_mode_blocks_aggregate_sql_without_a_plan() -> None:
     check = validate_sql_against_semantic_contracts(
         None,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import logging
 import os
 import sys
@@ -108,6 +109,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Only run sql_accuracy and skip expected_outcome checks",
     )
+    parser.add_argument(
+        "--case-id",
+        action="append",
+        dest="case_ids",
+        help="Run only the selected test case ID; repeat for multiple cases",
+    )
     return parser.parse_args()
 
 
@@ -124,6 +131,36 @@ def load_dataset(dataset_path: Path) -> EvaluationDataset:
     if dataset_path.suffix.lower() in {".yaml", ".yml"}:
         return EvaluationDataset.from_yaml(dataset_path)
     return EvaluationDataset.from_json(dataset_path)
+
+
+def select_test_cases(
+    dataset: EvaluationDataset,
+    case_ids: list[str] | None,
+) -> EvaluationDataset:
+    """Return a stable, validated subset for smoke and targeted regression runs."""
+    if not case_ids:
+        return dataset
+
+    requested = list(dict.fromkeys(case_ids))
+    cases_by_id = {case.id: case for case in dataset.test_cases}
+    missing = [case_id for case_id in requested if case_id not in cases_by_id]
+    if missing:
+        raise ValueError("Unknown evaluation case ID(s): " + ", ".join(missing))
+
+    return EvaluationDataset(
+        name=f"{dataset.name} ({len(requested)} selected cases)",
+        test_cases=[cases_by_id[case_id] for case_id in requested],
+        description=dataset.description,
+    )
+
+
+def selected_dataset_hash(dataset_path: Path, case_ids: list[str] | None) -> str:
+    """Keep full and targeted runs in separate resume namespaces."""
+    base_hash = dataset_hash(dataset_path)
+    if not case_ids:
+        return base_hash
+    selection = ",".join(dict.fromkeys(case_ids))
+    return hashlib.sha256(f"{base_hash}:{selection}".encode("utf-8")).hexdigest()
 
 
 def should_include_expected_outcome(args: argparse.Namespace) -> bool:
@@ -369,11 +406,11 @@ async def main_async(args: argparse.Namespace) -> None:
         )
 
     emit_status("▶ Loading evaluation dataset...")
-    dataset = load_dataset(dataset_path)
+    dataset = select_test_cases(load_dataset(dataset_path), args.case_ids)
     emit_status(f"✅ Dataset loaded: {dataset.name} ({len(dataset.test_cases)} cases)")
 
     resume_root = Path(args.resume_root).expanduser()
-    dataset_hash_value = dataset_hash(dataset_path)
+    dataset_hash_value = selected_dataset_hash(dataset_path, args.case_ids)
     include_expected_outcome = should_include_expected_outcome(args)
     evaluator_names = build_evaluator_names(
         include_expected_outcome=include_expected_outcome,

@@ -276,6 +276,9 @@ When exact physical table names are already known, pass table_names to fetch the
             if context.metadata
             else {}
         )
+        active_database_name = (
+            context.metadata.get("database_id") if context.metadata else None
+        )
         context_seed_tables = context_schema_retrieve.get("seed_tables", [])
         context_seed_table_refs = context_schema_retrieve.get("seed_table_refs", [])
         contract_query = "\n".join(
@@ -359,7 +362,9 @@ When exact physical table names are already known, pass table_names to fetch the
                     table_schema = await self._schema_memory.get_table_schema(
                         table_name=ref["table_name"],
                         schema_name=ref["schema_name"],
-                        database_name=ref["database_name"],
+                        database_name=(
+                            ref["database_name"] or active_database_name
+                        ),
                         context=context,
                     )
                     if table_schema is None:
@@ -386,6 +391,7 @@ When exact physical table names are already known, pass table_names to fetch the
                     seed_tables=[ref["full_name"] for ref in seed_table_refs]
                     if effective_search_mode == SearchMode.EXPAND
                     else None,
+                    database_name=active_database_name,
                 )
 
             # Format results for LLM
@@ -460,6 +466,7 @@ When exact physical table names are already known, pass table_names to fetch the
                 "selected_primary_keys": selected_primary_keys,
                 "selected_column_refs": selected_column_refs,
                 "domain_filter": args.domain_filter,
+                "database_name": active_database_name,
                 "required_fields": required_fields,
                 "exact_table_names": [ref["full_name"] for ref in exact_table_refs],
                 "missing_exact_tables": missing_exact_tables,

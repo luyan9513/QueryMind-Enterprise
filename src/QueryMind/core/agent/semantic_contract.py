@@ -326,11 +326,18 @@ def validate_sql_against_semantic_contracts(
     projection_expressions: set[str] = set()
     projection_aliases: list[str] = []
     advisories = list(plan_check.advisories)
-    if select is not None:
-        for projection in select.expressions:
+    selects = list(statement.find_all(exp.Select))
+    if isinstance(statement, exp.Select) and statement not in selects:
+        selects.insert(0, statement)
+    for candidate_select in selects:
+        for projection in candidate_select.expressions:
             projection_aliases.append(str(projection.alias_or_name or ""))
             base = projection.this if isinstance(projection, exp.Alias) else projection
-            projection_expressions.add(_canonical_expression_node(base, dialect))
+            projection_expressions.update(
+                _canonical_expression_node(node, dialect)
+                for node in base.walk()
+                if isinstance(node, exp.Expression)
+            )
 
     for contract_id in cited_ids:
         contract = metrics.get(contract_id)

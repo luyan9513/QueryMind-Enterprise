@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -48,12 +48,14 @@ class ResultComparisonPolicy(BaseModel):
     order_sensitive: Optional[bool] = None
     compare_column_names: bool = False
     value_aliases: Dict[str, List[str]] = Field(default_factory=dict)
+    temporal_granularity: Literal["exact", "date"] = "exact"
 
 
 class ExpectedSqlContract(BaseModel):
     """Dataset-owned structural requirements checked against generated SQL."""
 
     required_features: List[str] = Field(default_factory=list)
+    required_feature_groups: List[List[str]] = Field(default_factory=list)
     forbidden_features: List[str] = Field(default_factory=list)
     required_columns: List[str] = Field(default_factory=list)
     forbidden_columns: List[str] = Field(default_factory=list)

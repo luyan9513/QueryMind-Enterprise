@@ -167,6 +167,25 @@ def _dedupe(values: List[str]) -> List[str]:
     return result
 
 
+def _canonical_predicate_expression(
+    value: Any,
+    dialect: Optional[str],
+) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        expression = parse_one(text, read=str(dialect or "").strip() or None)
+    except Exception:
+        return _IDENTIFIER_QUOTE_RE.sub("", text).strip().lower()
+    normalized = expression.copy().transform(
+        lambda node: exp.column(str(node.name or ""))
+        if isinstance(node, exp.Column)
+        else node
+    )
+    return normalized.sql(dialect=str(dialect or "").strip() or None).casefold()
+
+
 def build_schema_evidence(
     existing_metadata: Dict[str, Any],
     result_metadata: Dict[str, Any],
@@ -309,6 +328,7 @@ def _parse_sql_details(sql: str, dialect: Optional[str]) -> Dict[str, Any]:
             "tables": [],
             "columns": [],
             "where_columns": [],
+            "filter_expressions": [],
         }
 
     cte_aliases = {
@@ -333,17 +353,27 @@ def _parse_sql_details(sql: str, dialect: Optional[str]) -> Dict[str, Any]:
         if str(column.name or "").strip()
     ]
     where_columns: List[str] = []
-    for where in statement.find_all(exp.Where):
+    filter_expressions: List[str] = []
+    for predicate in [
+        *statement.find_all(exp.Where),
+        *statement.find_all(exp.Having),
+    ]:
         where_columns.extend(
             str(column.name or "").strip()
-            for column in where.find_all(exp.Column)
+            for column in predicate.find_all(exp.Column)
             if str(column.name or "").strip()
+        )
+        filter_expressions.extend(
+            _canonical_predicate_expression(node, dialect)
+            for node in predicate.this.walk()
+            if isinstance(node, (exp.Column, exp.AggFunc))
         )
 
     return {
         "tables": _dedupe(tables),
         "columns": _dedupe(columns),
         "where_columns": _dedupe(where_columns),
+        "filter_expressions": _dedupe(filter_expressions),
     }
 
 
@@ -427,6 +457,7 @@ def validate_sql_against_query_plan(
     actual_tables = details["tables"] or list(shape.table_references)
     actual_columns = details["columns"]
     where_columns = details["where_columns"]
+    filter_expressions = set(details["filter_expressions"])
     issues: List[str] = []
 
     for table in plan.source_tables:
@@ -448,6 +479,12 @@ def validate_sql_against_query_plan(
         parts[-1] for value in where_columns if (parts := _identifier_parts(value))
     }
     for query_filter in plan.filters:
+        planned_expression = _canonical_predicate_expression(
+            query_filter.column,
+            dialect,
+        )
+        if planned_expression and planned_expression in filter_expressions:
+            continue
         column_parts = _identifier_parts(query_filter.column)
         if column_parts and column_parts[-1] not in where_column_names:
             issues.append(f"planned_filter_missing_from_sql:{query_filter.column}")

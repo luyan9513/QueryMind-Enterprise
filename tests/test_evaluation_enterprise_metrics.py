@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 import sys
 
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -109,6 +112,95 @@ def test_business_comparison_policy_normalizes_precision_and_value_aliases() -> 
     ]
 
 
+def test_dataframe_fingerprint_normalizes_equivalent_numeric_types() -> None:
+    decimal_year = fingerprint_dataframe(
+        pd.DataFrame([{"year": Decimal("2024.0"), "total": Decimal("10.50")}])
+    )
+    native_numbers = fingerprint_dataframe(
+        pd.DataFrame([{"year": 2024, "total": 10.5}])
+    )
+
+    assert decimal_year["ordered_result_fingerprint"] == native_numbers[
+        "ordered_result_fingerprint"
+    ]
+
+
+def test_dataframe_fingerprint_can_compare_naive_midnight_at_date_granularity() -> None:
+    calendar_date = fingerprint_dataframe(
+        pd.DataFrame([{"invoice_date": date(2024, 1, 2)}]),
+        temporal_granularity="date",
+    )
+    midnight_timestamp = fingerprint_dataframe(
+        pd.DataFrame([{"invoice_date": datetime(2024, 1, 2)}]),
+        temporal_granularity="date",
+    )
+
+    assert calendar_date["ordered_result_fingerprint"] == midnight_timestamp[
+        "ordered_result_fingerprint"
+    ]
+
+
+def test_dataframe_fingerprint_keeps_temporal_comparison_exact_by_default() -> None:
+    calendar_date = fingerprint_dataframe(
+        pd.DataFrame([{"invoice_date": date(2024, 1, 2)}])
+    )
+    midnight_timestamp = fingerprint_dataframe(
+        pd.DataFrame([{"invoice_date": datetime(2024, 1, 2)}])
+    )
+
+    assert calendar_date["ordered_result_fingerprint"] != midnight_timestamp[
+        "ordered_result_fingerprint"
+    ]
+
+
+def test_date_granularity_does_not_hide_time_or_timezone_differences() -> None:
+    calendar_date = fingerprint_dataframe(
+        pd.DataFrame([{"invoice_date": date(2024, 1, 2)}]),
+        temporal_granularity="date",
+    )
+    non_midnight = fingerprint_dataframe(
+        pd.DataFrame([{"invoice_date": datetime(2024, 1, 2, 8, 30)}]),
+        temporal_granularity="date",
+    )
+    timezone_aware = fingerprint_dataframe(
+        pd.DataFrame(
+            [{"invoice_date": datetime(2024, 1, 2, tzinfo=timezone.utc)}]
+        ),
+        temporal_granularity="date",
+    )
+
+    assert calendar_date["ordered_result_fingerprint"] != non_midnight[
+        "ordered_result_fingerprint"
+    ]
+    assert calendar_date["ordered_result_fingerprint"] != timezone_aware[
+        "ordered_result_fingerprint"
+    ]
+
+
+def test_chinook_date_granularity_is_explicit_and_case_scoped() -> None:
+    dataset = EvaluationDataset.from_yaml(
+        Path(__file__).resolve().parents[1]
+        / "src/evals/datasets/chinook_business_zh.yaml"
+    )
+    policies = {
+        case.id: case.result_comparison.temporal_granularity
+        for case in dataset.test_cases
+    }
+
+    date_scoped_cases = {"ch_zh_018", "ch_zh_033", "ch_zh_037"}
+    assert all(policies[case_id] == "date" for case_id in date_scoped_cases)
+    assert all(
+        granularity == "exact"
+        for case_id, granularity in policies.items()
+        if case_id not in date_scoped_cases
+    )
+
+
+def test_result_comparison_rejects_unknown_temporal_granularity() -> None:
+    with pytest.raises(ValueError):
+        ResultComparisonPolicy(temporal_granularity="hour")
+
+
 def test_sql_contract_catches_semantic_drift_without_dataset_runtime_rules() -> None:
     contract = ExpectedSqlContract(
         required_features=["aggregation", "group_by", "where"],
@@ -142,6 +234,72 @@ def test_sql_contract_catches_semantic_drift_without_dataset_runtime_rules() -> 
     assert drifted["sql_contract_passed"] is False
     assert "missing_column:totaldue" in drifted["sql_contract_violations"]
     assert "missing_filter_column:currentflag" in drifted["sql_contract_violations"]
+
+
+def test_sql_contract_accepts_any_declared_required_feature_group_member() -> None:
+    contract = ExpectedSqlContract(
+        required_features=["aggregation", "group_by"],
+        required_feature_groups=[["where", "having"]],
+    )
+    where_result = evaluate_sql_contract(
+        "SELECT customer_id, SUM(total) FROM invoice "
+        "WHERE total > 0 GROUP BY customer_id",
+        contract,
+        dialect="postgres",
+    )
+    having_result = evaluate_sql_contract(
+        "SELECT customer_id, SUM(total) FROM invoice "
+        "GROUP BY customer_id HAVING SUM(total) > 0",
+        contract,
+        dialect="postgres",
+    )
+    missing_result = evaluate_sql_contract(
+        "SELECT customer_id, SUM(total) FROM invoice GROUP BY customer_id",
+        contract,
+        dialect="postgres",
+    )
+
+    assert where_result["sql_contract_passed"] is True
+    assert having_result["sql_contract_passed"] is True
+    assert missing_result["sql_contract_violations"] == [
+        "missing_feature_group:having|where"
+    ]
+
+
+def test_chinook_average_customer_spend_contract_allows_where_or_having() -> None:
+    dataset = EvaluationDataset.from_yaml(
+        Path(__file__).resolve().parents[1]
+        / "src/evals/datasets/chinook_business_zh.yaml"
+    )
+    test_case = next(case for case in dataset.test_cases if case.id == "ch_zh_016")
+
+    assert test_case.expected_sql_contract is not None
+    assert test_case.expected_sql_contract.required_feature_groups == [
+        ["where", "having"]
+    ]
+    assert "where" not in test_case.expected_sql_contract.required_features
+
+
+def test_chinook_v09_development_batches_have_valid_reference_contracts() -> None:
+    dataset_path = (
+        Path(__file__).resolve().parents[1]
+        / "src/evals/datasets/chinook_business_zh.yaml"
+    )
+    dataset = EvaluationDataset.from_yaml(dataset_path)
+
+    assert len(dataset) == 50
+    assert {case.id for case in dataset.test_cases} == {
+        f"ch_zh_{index:03d}" for index in range(1, 51)
+    }
+    assert all(case.expected_schema and case.expected_schema.tables for case in dataset)
+    assert all(
+        evaluate_sql_contract(
+            case.ground_truth_sql,
+            case.expected_sql_contract,
+            dialect=case.dialect,
+        )["sql_contract_passed"]
+        for case in dataset
+    )
 
 
 def test_rescore_reuses_hashes_without_calling_model_or_database() -> None:

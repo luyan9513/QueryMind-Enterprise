@@ -375,6 +375,31 @@ def test_rls_registry_requires_and_enforces_accepted_query_plan() -> None:
     assert isinstance(accepted, RunSqlToolArgs)
 
 
+def test_query_plan_accepts_aggregate_filter_in_having() -> None:
+    plan = _sales_plan(
+        filters=[
+            QueryPlanFilter(
+                column="COUNT(sales.salesorderheader.salesorderid)",
+                operator=">=",
+                value_description="at least five orders",
+            )
+        ]
+    )
+    sql = """
+        SELECT customerid, COUNT(salesorderid) AS order_count
+        FROM sales.salesorderheader
+        GROUP BY customerid
+        HAVING COUNT(salesorderid) >= 5
+    """
+
+    check = validate_sql_against_query_plan(plan, sql, dialect="postgres")
+
+    assert not any(
+        issue.startswith("planned_filter_missing_from_sql")
+        for issue in check.issues
+    )
+
+
 def test_adaptive_registry_bypasses_only_low_risk_sql() -> None:
     registry = RLSToolRegistry(query_plan_mode=QueryPlanMode.ADAPTIVE)
     tool = SimpleNamespace(name="run_sql")

@@ -272,6 +272,25 @@ def test_sql_semantics_rejects_row_grain_mismatch() -> None:
     assert "row grain" in reason.lower()
 
 
+def test_sql_semantics_keeps_cte_grouping_in_its_own_select_scope() -> None:
+    reason = sql_semantics_rejection_reason(
+        """
+        WITH customer_totals AS (
+            SELECT customer_id, SUM(total) AS customer_total
+            FROM invoice
+            GROUP BY customer_id
+        )
+        SELECT customer_id, customer_total
+        FROM customer_totals
+        WHERE customer_total > (SELECT AVG(customer_total) FROM customer_totals)
+        """,
+        user_message="show customers whose total is above the customer average",
+        semantics_config={"enabled": True, "check_row_grain": True},
+    )
+
+    assert reason is None
+
+
 def test_sql_governance_middleware_injects_baseline_prompt_without_static_checklist() -> None:
     profile = build_sql_governance_profile(
         tags=["window", "join"],

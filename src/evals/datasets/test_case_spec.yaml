@@ -99,6 +99,7 @@ test_case_fields:
       numeric_decimal_places: 2
       order_sensitive: false
       compare_column_names: false
+      temporal_granularity: exact
       value_aliases: {online: ["线上订单"], offline: ["线下订单"]}
     fields:
       numeric_decimal_places:
@@ -110,6 +111,10 @@ test_case_fields:
       compare_column_names:
         required: false
         type: boolean
+      temporal_granularity:
+        required: false
+        type: string
+        allowed_values: ["exact", "date"]
       value_aliases:
         required: false
         type: object
@@ -120,6 +125,7 @@ test_case_fields:
     description: Structural SQL requirements owned by this dataset, never injected into the runtime agent.
     sample:
       required_features: ["group_by", "where"]
+      required_feature_groups: [["where", "having"]]
       required_columns: ["orderdate", "totaldue"]
       forbidden_columns: ["modifieddate"]
       required_filter_columns: ["orderdate"]
@@ -130,6 +136,9 @@ test_case_fields:
       required_features:
         required: false
         type: list[string]
+      required_feature_groups:
+        required: false
+        type: list[list[string]]
       forbidden_features:
         required: false
         type: list[string]

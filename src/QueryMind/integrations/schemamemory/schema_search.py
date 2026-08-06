@@ -53,6 +53,7 @@ class FusionResult:
     fusion_score: float
     rank: int
     source: str  # "vector", "graph", or "both"
+    database_name: Optional[str] = None
 
 
 class SchemaSearch:
@@ -112,9 +113,11 @@ class SchemaSearch:
         
         # Process vector results (already sorted by similarity)
         for rank, vr in enumerate(vector_results):
-            key = f"{vr.schema_name}.{vr.table_name}"
+            database_name = vr.database_name or vr.metadata.get("database_name")
+            key = f"{database_name or ''}.{vr.schema_name}.{vr.table_name}"
             scores[key]["table_name"] = vr.table_name
             scores[key]["schema_name"] = vr.schema_name
+            scores[key]["database_name"] = database_name
             scores[key]["vector_score"] = vr.score
             scores[key]["memory_id"] = vr.memory_id
             
@@ -127,12 +130,14 @@ class SchemaSearch:
             table = gr.get("table", {})
             table_name = table.get("table_name", "")
             schema_name = table.get("schema_name", "public")
+            database_name = table.get("database_name")
             hops = gr.get("hops", 1)
-            
-            key = f"{schema_name}.{table_name}"
+
+            key = f"{database_name or ''}.{schema_name}.{table_name}"
             scores[key]["table_name"] = table_name
             scores[key]["schema_name"] = schema_name
-            
+            scores[key]["database_name"] = database_name
+
             # Convert hops to graph score: 1 / (hops + 1)
             graph_score = 1.0 / (hops + 1)
             scores[key]["graph_score"] = graph_score
@@ -170,6 +175,7 @@ class SchemaSearch:
                 fusion_score=item["fusion_score"],
                 rank=rank + 1,
                 source=source,
+                database_name=item.get("database_name"),
             ))
         
         return results
@@ -182,6 +188,7 @@ class SchemaSearch:
         threshold: float = 0.3,
         domain_filter: Optional[str] = None,
         required_fields: Optional[List[str]] = None,
+        database_name: Optional[str] = None,
     ) -> List[FusionResult]:
         """
         Perform hybrid search by business query.
@@ -201,6 +208,11 @@ class SchemaSearch:
             limit=self._config.max_vector_results,
             threshold=threshold,
             domain_filter=domain_filter,
+            **(
+                {"database_name_filter": database_name}
+                if database_name
+                else {}
+            ),
         )
 
         vector_results = await vector_task
@@ -210,9 +222,13 @@ class SchemaSearch:
                 field_names=required_fields,
                 domain_filter=domain_filter,
                 limit=self._config.max_graph_results,
+                database_name=database_name,
             )
         elif domain_filter:
-            graph_results = await self._search_graph_by_domain(domain_filter)
+            graph_results = await self._search_graph_by_domain(
+                domain_filter,
+                database_name=database_name,
+            )
         elif vector_results:
             seed_results = vector_results[: max(1, self._config.graph_seed_count)]
             expansion_results = await asyncio.gather(
@@ -221,6 +237,11 @@ class SchemaSearch:
                         table_name=result.table_name,
                         schema_name=result.schema_name,
                         max_hops=max(1, self._config.graph_seed_max_hops),
+                        **(
+                            {"database_name": database_name}
+                            if database_name
+                            else {}
+                        ),
                     )
                     for result in seed_results
                 ),
@@ -234,6 +255,12 @@ class SchemaSearch:
                     )
         else:
             graph_results = []
+
+        if database_name:
+            for graph_result in graph_results:
+                table = graph_result.get("table")
+                if isinstance(table, dict):
+                    table.setdefault("database_name", database_name)
         
         if vector_results and not graph_results:
             return self._rrf_fusion(vector_results, [])[:limit]
@@ -250,6 +277,7 @@ class SchemaSearch:
             for graph_result in graph_results:
                 table = graph_result.get("table", {})
                 key = (
+                    str(table.get("database_name") or "").lower(),
                     str(table.get("schema_name", "public")).lower(),
                     str(table.get("table_name", "")).lower(),
                 )
@@ -260,7 +288,11 @@ class SchemaSearch:
             fused_results.sort(
                 key=lambda item: (
                     field_coverage.get(
-                        (item.schema_name.lower(), item.table_name.lower()),
+                        (
+                            (item.database_name or "").lower(),
+                            item.schema_name.lower(),
+                            item.table_name.lower(),
+                        ),
                         0,
                     ),
                     item.fusion_score,
@@ -278,6 +310,7 @@ class SchemaSearch:
         limit: int = 10,
         threshold: float = 0.3,
         domain_filter: Optional[str] = None,
+        database_name: Optional[str] = None,
     ) -> List[FusionResult]:
         """
         Search using vector search only.
@@ -296,6 +329,11 @@ class SchemaSearch:
             limit=limit,
             threshold=threshold,
             domain_filter=domain_filter,
+            **(
+                {"database_name_filter": database_name}
+                if database_name
+                else {}
+            ),
         )
         
         return [
@@ -307,6 +345,7 @@ class SchemaSearch:
                 fusion_score=r.score,  # Use vector score directly
                 rank=i + 1,
                 source="vector",
+                database_name=r.database_name or r.metadata.get("database_name"),
             )
             for i, r in enumerate(vector_results)
         ]
@@ -319,6 +358,7 @@ class SchemaSearch:
         max_hops: int = 2,
         domain_filter: Optional[str] = None,
         required_fields: Optional[List[str]] = None,
+        database_name: Optional[str] = None,
     ) -> List[FusionResult]:
         """
         Search using graph traversal only.
@@ -337,21 +377,25 @@ class SchemaSearch:
                 field_names=required_fields,
                 domain_filter=domain_filter,
                 limit=self._config.max_graph_results,
+                database_name=database_name,
             )
         elif table_name:
             graph_results = await self._graph_store.find_related_tables(
                 table_name=table_name,
                 schema_name=schema_name,
                 max_hops=max_hops,
+                **({"database_name": database_name} if database_name else {}),
             )
         elif domain_filter:
             graph_results = await self._graph_store.find_tables_by_domain(
                 domain=domain_filter,
                 limit=self._config.max_graph_results,
+                **({"database_name": database_name} if database_name else {}),
             )
         else:
             graph_results = await self._graph_store.list_all_tables(
                 limit=self._config.max_graph_results,
+                **({"database_name": database_name} if database_name else {}),
             )
         
         # Convert to FusionResult
@@ -369,6 +413,7 @@ class SchemaSearch:
                 fusion_score=graph_score,
                 rank=rank + 1,
                 source="graph",
+                database_name=table.get("database_name"),
             ))
         
         return results
@@ -380,6 +425,7 @@ class SchemaSearch:
         schema_name: str = "public",
         max_hops: int = 2,
         limit: int = 20,
+        database_name: Optional[str] = None,
     ) -> List[FusionResult]:
         """
         Expand seed tables through graph traversal.
@@ -410,6 +456,7 @@ class SchemaSearch:
                 table_name=seed_table,
                 schema_name=seed_schema,
                 max_hops=max_hops,
+                **({"database_name": database_name} if database_name else {}),
             )
             all_graph_results.extend(results)
         
@@ -418,7 +465,11 @@ class SchemaSearch:
         unique_results = []
         for gr in all_graph_results:
             table = gr.get("table", {})
-            key = f"{table.get('schema_name', 'public')}.{table.get('table_name', '')}"
+            key = (
+                f"{table.get('database_name') or ''}."
+                f"{table.get('schema_name', 'public')}."
+                f"{table.get('table_name', '')}"
+            )
             if key not in seen:
                 seen.add(key)
                 unique_results.append(gr)
@@ -437,6 +488,7 @@ class SchemaSearch:
                 fusion_score=1.0 / (gr.get("hops", 0) + 1),
                 rank=i + 1,
                 source="graph",
+                database_name=gr.get("table", {}).get("database_name"),
             )
             for i, gr in enumerate(unique_results)
         ]
@@ -448,6 +500,7 @@ class SchemaSearch:
         field_names: List[str],
         domain_filter: Optional[str] = None,
         limit: int = 10,
+        database_name: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Search graph by normalized fields and rank tables by field coverage."""
         normalized_fields = []
@@ -462,16 +515,21 @@ class SchemaSearch:
 
         table_matches: Dict[str, Dict[str, Any]] = {}
         for field_index, field_name in enumerate(normalized_fields):
+            database_kwargs = (
+                {"database_name": database_name} if database_name else {}
+            )
             results = await self._graph_store.find_tables_by_field(
                 field_name=field_name,
                 exact_match=True,
                 limit=limit,
+                **database_kwargs,
             )
             if not results:
                 results = await self._graph_store.find_tables_by_field(
                     field_name=field_name,
                     exact_match=False,
                     limit=limit,
+                    **database_kwargs,
                 )
 
             for result_index, result in enumerate(results):
@@ -482,7 +540,10 @@ class SchemaSearch:
                     continue
                 if domain_filter and table.get("domain") != domain_filter:
                     continue
-                key = f"{schema_name}.{table_name}".lower()
+                key = (
+                    f"{table.get('database_name') or ''}."
+                    f"{schema_name}.{table_name}"
+                ).lower()
                 entry = table_matches.setdefault(
                     key,
                     {
@@ -508,11 +569,13 @@ class SchemaSearch:
     async def _search_graph_by_domain(
         self,
         domain: str,
+        database_name: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Search graph by domain."""
         results = await self._graph_store.find_tables_by_domain(
             domain=domain,
             limit=self._config.max_graph_results,
+            **({"database_name": database_name} if database_name else {}),
         )
         return results
     

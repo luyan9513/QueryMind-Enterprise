@@ -159,6 +159,7 @@ class SchemaMemory(ABC):
         table_name: str,
         context: "ToolContext",
         schema_name: str = "public",
+        database_name: Optional[str] = None,
     ) -> bool:
         """Delete a table schema."""
         pass

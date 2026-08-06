@@ -8,9 +8,11 @@ from evals.bootstrap import (  # noqa: E402
     DEFAULT_OUTPUT_ROOT,
     DEFAULT_RESULTS_ROOT,
     DEFAULT_RESUME_ROOT,
+    build_sql_runner_from_env,
     resolve_agent_temperature,
     resolve_evaluation_mode,
     resolve_evaluation_providers,
+    resolve_postgres_schemas,
 )
 from QueryMind.core.evaluation import EvaluationMode  # noqa: E402
 import evals.bootstrap as bootstrap  # noqa: E402
@@ -65,6 +67,28 @@ def test_evaluation_mode_prefers_explicit_value_then_env(monkeypatch) -> None:
     assert resolve_evaluation_mode("s0") == EvaluationMode.S0_SINGLE_SHOT
 
 
+def test_postgres_schema_scope_is_configurable_per_data_source(monkeypatch) -> None:
+    monkeypatch.delenv("EVAL_POSTGRES_SCHEMAS", raising=False)
+    assert resolve_postgres_schemas() == [
+        "person",
+        "humanresources",
+        "production",
+        "purchasing",
+        "sales",
+    ]
+
+    monkeypatch.setenv("EVAL_POSTGRES_SCHEMAS", " public, analytics,public ")
+    assert resolve_postgres_schemas() == ["public", "analytics"]
+
+    monkeypatch.setenv("EVAL_POSTGRES_SCHEMAS", " , ")
+    try:
+        resolve_postgres_schemas()
+    except ValueError as exc:
+        assert "at least one schema" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("empty schema scope should fail")
+
+
 def test_load_environment_preserves_explicit_run_configuration(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -80,3 +104,19 @@ def test_load_environment_preserves_explicit_run_configuration(
 
     assert bootstrap.os.getenv("EVAL_SCHEMA_SYNC_MODE") == "reuse_existing"
     assert bootstrap.os.getenv("EVAL_DATASET_PATH") == "from-dotenv.yaml"
+
+
+def test_build_sql_runner_does_not_require_model_configuration(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("EVAL_DATABASE_ID", "sqlite-demo")
+    monkeypatch.setenv("EVAL_DB_DIALECT", "sqlite")
+    monkeypatch.setenv("EVAL_SQLITE_DATABASE_PATH", str(tmp_path / "demo.sqlite"))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    database_id, dialect, runner = build_sql_runner_from_env()
+
+    assert database_id == "sqlite-demo"
+    assert dialect == "sqlite"
+    assert runner.__class__.__name__ == "SqliteRunner"

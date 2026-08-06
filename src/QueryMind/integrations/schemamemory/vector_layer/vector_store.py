@@ -44,6 +44,7 @@ class VectorSearchResult:
     memory_id: str
     score: float
     metadata: Dict[str, Any]
+    database_name: Optional[str] = None
 
 
 class Mem0VectorStore:
@@ -321,11 +322,14 @@ class Mem0VectorStore:
             results = memory.get_all(
                 user_id=user_id or self._default_user_id,
                 filters=filters,
-                limit=1,
+                limit=2,
             )
-            
-            if results and "results" in results and len(results["results"]) > 0:
-                return results["results"][0].get("id")
+
+            matches = results.get("results", []) if results else []
+            if database_name is None and len(matches) > 1:
+                return None
+            if matches:
+                return matches[0].get("id")
             return None
         
         return await asyncio.get_event_loop().run_in_executor(self._executor, _get)
@@ -342,6 +346,7 @@ class Mem0VectorStore:
         threshold: float = 0.3,
         domain_filter: Optional[str] = None,
         table_name_filter: Optional[str] = None,
+        database_name_filter: Optional[str] = None,
         rerank: bool = False,
     ) -> List[VectorSearchResult]:
         """
@@ -367,6 +372,7 @@ class Mem0VectorStore:
                 filters = self._build_simple_filters(
                     domain_filter=domain_filter,
                     table_name_filter=table_name_filter,
+                    database_name_filter=database_name_filter,
                 )
 
                 search_params = {
@@ -392,6 +398,7 @@ class Mem0VectorStore:
                         vector_results.append(VectorSearchResult(
                             table_name=metadata.get("table_name", ""),
                             schema_name=metadata.get("schema_name", "public"),
+                            database_name=metadata.get("database_name"),
                             memory_id=item.get("id", ""),
                             score=item.get("score", 0.0),
                             metadata=metadata,
@@ -403,13 +410,15 @@ class Mem0VectorStore:
                     top_scores = []
                 logger.info(
                     "Schema vector search query=%r user_id=%s agent_id=%s threshold=%.3f "
-                    "domain_filter=%s table_name_filter=%s hits=%d top_scores=%s",
+                    "domain_filter=%s table_name_filter=%s database_name_filter=%s "
+                    "hits=%d top_scores=%s",
                     query,
                     search_params["user_id"],
                     search_params.get("agent_id"),
                     threshold,
                     domain_filter,
                     table_name_filter,
+                    database_name_filter,
                     len(vector_results),
                     top_scores,
                 )
@@ -464,6 +473,7 @@ class Mem0VectorStore:
         limit: int = 100,
         offset: int = 0,
         domain_filter: Optional[str] = None,
+        database_name_filter: Optional[str] = None,
     ) -> List[VectorSearchResult]:
         """
         Get all stored table schemas.
@@ -479,7 +489,10 @@ class Mem0VectorStore:
         """
         def _get_all() -> List[VectorSearchResult]:
             memory = self._get_memory()
-            filters = self._build_simple_filters(domain_filter=domain_filter)
+            filters = self._build_simple_filters(
+                domain_filter=domain_filter,
+                database_name_filter=database_name_filter,
+            )
             
             results = memory.get_all(
                 user_id=user_id or self._default_user_id,
@@ -494,6 +507,7 @@ class Mem0VectorStore:
                     schemas.append(VectorSearchResult(
                         table_name=metadata.get("table_name", ""),
                         schema_name=metadata.get("schema_name", "public"),
+                        database_name=metadata.get("database_name"),
                         memory_id=item.get("id", ""),
                         score=1.0,  # No score for get_all
                         metadata=metadata,

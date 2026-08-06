@@ -1113,8 +1113,8 @@ def _row_grain_rejection_reason(
         )
 
     if (
-        analysis.has_aggregation
-        and not analysis.has_group_by
+        int(analysis.aggregate_projection_count or 0) > 0
+        and not analysis.group_by_items
         and not analysis.has_over
         and int(analysis.aggregate_projection_count or 0) > 0
         and int(analysis.non_aggregate_projection_count or 0) > 0
@@ -1131,7 +1131,7 @@ def _row_grain_rejection_reason(
         )
 
     if (
-        analysis.has_group_by
+        analysis.group_by_items
         and not (analysis.has_rollup or analysis.has_grouping_sets or analysis.has_grouping)
         and int(analysis.non_aggregate_projection_count or 0)
         > max(1, len(analysis.group_by_items))
@@ -1368,7 +1368,11 @@ def sql_semantics_rejection_reason(
     if config.get("check_aggregation", True) and (
         "aggregation" in intents or "grouping" in intents or _strong_grouping_cue(message_text)
     ):
-        if analysis.has_aggregation and not analysis.has_group_by and not analysis.has_over:
+        if (
+            analysis.aggregate_projection_count > 0
+            and not analysis.group_by_items
+            and not analysis.has_over
+        ):
             if analysis.non_aggregate_projection_count > 0 and analysis.aggregate_projection_count > 0:
                 if repair_mode:
                     return (
@@ -1400,7 +1404,7 @@ def sql_semantics_rejection_reason(
                 "HAVING was used without GROUP BY. Rewrite from scratch and make the "
                 "grouping explicit."
             )
-        if analysis.has_group_by and not (
+        if analysis.group_by_items and not (
             analysis.has_rollup or analysis.has_grouping_sets or analysis.has_grouping
         ):
             group_by_count = max(1, len(analysis.group_by_items))
@@ -2435,12 +2439,12 @@ def _sql_repair_strategy_from_snapshot(
         structural_reasons.append("grouped_shape")
 
     grouped_projection_mismatch = (
-        has_group_by
+        bool(group_by_items)
         and non_aggregate_projection_count > max(1, len(group_by_items))
     )
     mixed_aggregate_shape = (
-        has_aggregation
-        and not has_group_by
+        aggregate_projection_count > 0
+        and not group_by_items
         and aggregate_projection_count > 0
         and non_aggregate_projection_count > 0
     )

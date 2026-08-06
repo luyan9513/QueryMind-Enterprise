@@ -26,6 +26,7 @@ def _normalize_cell(
     *,
     numeric_decimal_places: Optional[int] = None,
     value_aliases: Optional[Dict[str, str]] = None,
+    temporal_granularity: str = "exact",
 ) -> Any:
     if value is None:
         return None
@@ -34,14 +35,24 @@ def _normalize_cell(
             return None
     except (TypeError, ValueError):
         pass
-    if isinstance(value, (datetime, date, time)):
+    if isinstance(value, datetime):
+        if (
+            temporal_granularity == "date"
+            and value.tzinfo is None
+            and value.time() == time.min
+        ):
+            return value.date().isoformat()
         return value.isoformat()
+    if isinstance(value, (date, time)):
+        return value.isoformat()
+    if isinstance(value, bool):
+        return value
     if isinstance(value, Decimal):
         if numeric_decimal_places is not None:
             quantum = Decimal(1).scaleb(-numeric_decimal_places)
             value = value.quantize(quantum, rounding=ROUND_HALF_UP)
             return format(value, f".{numeric_decimal_places}f")
-        return format(value, "f")
+        return format(value.normalize(), "f")
     if isinstance(value, bytes):
         return value.hex()
     if isinstance(value, float):
@@ -55,11 +66,17 @@ def _normalize_cell(
             )
             return format(normalized, f".{numeric_decimal_places}f")
         return format(value, ".15g")
+    if isinstance(value, int):
+        if numeric_decimal_places is not None:
+            normalized = Decimal(value).quantize(
+                Decimal(1).scaleb(-numeric_decimal_places),
+                rounding=ROUND_HALF_UP,
+            )
+            return format(normalized, f".{numeric_decimal_places}f")
+        return str(value)
     if isinstance(value, str):
         alias = (value_aliases or {}).get(value.strip().casefold())
         return alias if alias is not None else value
-    if isinstance(value, (int, bool)):
-        return value
     return str(value)
 
 
@@ -76,6 +93,7 @@ def fingerprint_dataframe(
     *,
     numeric_decimal_places: Optional[int] = None,
     value_aliases: Optional[Dict[str, List[str]]] = None,
+    temporal_granularity: str = "exact",
 ) -> Dict[str, str]:
     """Build full-result hashes without persisting business result rows."""
     normalized_aliases: Dict[str, str] = {}
@@ -94,6 +112,7 @@ def fingerprint_dataframe(
                 value,
                 numeric_decimal_places=numeric_decimal_places,
                 value_aliases=normalized_aliases,
+                temporal_granularity=temporal_granularity,
             )
             for value in row
         ]
@@ -260,6 +279,14 @@ def evaluate_sql_contract(
     required_features = {
         _normalize_identifier(value) for value in contract.required_features
     }
+    required_feature_groups = [
+        {
+            _normalize_identifier(value)
+            for value in group
+            if _normalize_identifier(value)
+        }
+        for group in contract.required_feature_groups
+    ]
     forbidden_features = {
         _normalize_identifier(value) for value in contract.forbidden_features
     }
@@ -281,6 +308,9 @@ def evaluate_sql_contract(
     for feature in sorted(required_features):
         if not feature_presence.get(feature, False):
             violations.append(f"missing_feature:{feature}")
+    for group in required_feature_groups:
+        if group and not any(feature_presence.get(feature, False) for feature in group):
+            violations.append(f"missing_feature_group:{'|'.join(sorted(group))}")
     for feature in sorted(forbidden_features):
         if feature_presence.get(feature, False):
             violations.append(f"forbidden_feature:{feature}")
@@ -316,6 +346,9 @@ def evaluate_sql_contract(
             "features": sorted(
                 name for name, present in feature_presence.items() if present
             ),
+            "required_feature_groups": [
+                sorted(group) for group in required_feature_groups if group
+            ],
             "columns": sorted(columns),
             "filter_columns": sorted(filter_columns),
             "projection_aliases": sorted(projection_aliases),
