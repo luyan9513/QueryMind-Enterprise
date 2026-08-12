@@ -1,6 +1,6 @@
 # QueryMind: 为真实业务数据库构建 SQL Agents
 
-QueryMind 是一个面向真实 Text2SQL 场景的 LLM Agent 框架，提供 agentic retrieval 能力和企业级安全治理。
+QueryMind 是一个面向企业经营数据问答的可治理 Text2SQL Agent。它在 QueryMind 上游框架之上组合 Schema 检索、查询规划、SQL 安全控制、评测和可审计的运行状态。
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://python.org)
 [![README_EN](https://img.shields.io/badge/README-English%20version-0ea5e9.svg)](README.md)
@@ -8,16 +8,33 @@ QueryMind 是一个面向真实 Text2SQL 场景的 LLM Agent 框架，提供 age
 
 ## 企业经营数据问答个人版
 
-本 Fork 由 [luyan9513](https://github.com/luyan9513) 持续维护，作为企业经营数据问答方向的个人主项目。项目保留 QueryMind 上游的 Agent、Schema Memory 和 SQL Governance 基础，并完成以下个人改造与验证：
+本 Fork 由 [luyan9513](https://github.com/luyan9513) 持续维护，目标用户是需要从关系型数据库获得可靠答案、但不能直接放任模型执行 SQL 的分析人员和业务人员。
+
+项目复用 QueryMind 上游已有的 Agent Loop、Schema Memory、SQL Governance、RLS 和 Web Component。个人改造聚焦环境落地、模型适配、准确率评测、多数据源隔离、业务语义约束、失败恢复实验和持久化 Run/Event 契约：
 
 - 主 Agent 使用 DeepSeek，Mem0 LLM 与 `BAAI/bge-m3` Embedding 接入硅基流动。
 - 在只读 PostgreSQL 账号下通过 `pg_catalog` 抽取主外键，支持复合外键和跨 Schema 关系。
 - 实现 LLM 会话标题、历史自动刷新、Workflow 消息持久化和失败回退。
-- 在 AdventureWorks 68 张表、456 个字段上完成验证，Python 全量测试 117 项通过。
+- 建立 24 题 AdventureWorks 中文业务评测，记录完整结果正确率、首次成功率、Schema Recall、工具轮数、延迟、成本和失败归因。
+- 增加数据库级 Schema Memory 隔离，并以独立 Chinook 数据源、12 项业务指标和评测集验证第二数据源接入流程；v0.9 开发集当前完成 50/100 题。
+- 增加有边界的 Agent Run/Event 生命周期：幂等创建、租户/用户隔离读取、事件游标、乐观版本、取消和单进程原子开发 Store。
+- 在 AdventureWorks 68 张表、456 个字段和 Chinook 11 张表上完成验证；当前 Python 正式测试范围为 `229 passed, 1 warning`。
 
-上游能力、个人贡献、验证证据和后续路线见[项目归属与证据说明](docs/portfolio/ownership.md)。
+### 当前证据与能力边界
 
-https://github.com/user-attachments/assets/e87fc532-ef82-4765-96a7-e693924de5c7
+| 范围 | 已验证证据 | 边界 |
+|---|---|---|
+| AdventureWorks 落地 | PostgreSQL 只读链路、68 张表、456 个字段、Schema Memory 初始化 | 本机开发环境，不代表生产部署 |
+| Text2SQL 评测 | 固定 24 题、确定性结果对比、S0-S5 对照、逐题 SQL 与失败归因 | 结果只适用于记录的数据集、快照、模型和参数 |
+| 多数据源 | AdventureWorks 与独立的 11 表 Chinook 接入和准入流程 | 新数据源仍需初始化 Schema、定义业务口径并建立自己的评测基线 |
+| Agent 运行时 | 现有 Chat Agent 与 v0.10-A1 Run/Event 状态契约 | Run API 目前只创建排队状态；后台执行、实时 SSE、审批恢复和多实例存储尚未完成 |
+| 自动化验证 | `229 passed, 1 warning` | 这是 Python 测试结果，不代表生产可用性或并发能力 |
+
+本项目不会承诺任意数据库都达到固定准确率，而是通过可重复的数据源准入门槛，为每个数据源和版本建立可解释的准确率范围。
+
+上游边界、个人贡献和验证证据见[项目归属与证据说明](docs/portfolio/ownership.md)、[个人版变更记录](CHANGELOG_PORTFOLIO.md)和 [v0.10 运行时设计](docs/portfolio/v0.10-governed-agent-runtime.md)。
+
+[▶ 查看项目演示录像](https://github.com/user-attachments/assets/e87fc532-ef82-4765-96a7-e693924de5c7)
 
 <table>
   <tr>
@@ -52,20 +69,22 @@ https://github.com/user-attachments/assets/e87fc532-ef82-4765-96a7-e693924de5c7
 
 ---
 
-## 🌟 核心特性
+## 🌟 上游基础与个人版扩展
+
+下表描述的是组合后的完整系统。哪些来自上游、哪些属于个人开发或验证，以前面的归属文档为准。
 
 | 特性 | 说明 |
 |---------|-------------|
 | **🗄️ 多层记忆** | 会话存储、Agent Memory 和 Schema Memory 相互独立，避免历史、检索和 schema 知识互相污染。 |
 | **🎛️ 4 种 Schema Memory 检索模式** | hybrid / vector / graph / expand 四种模式，让 Agent 能针对不同查询选择合适的 schema 检索策略。 |
 | **🧮 Schema 管理** | UI 页面和命令让业务数据库元数据更容易维护、更新、人工修正，并借助 AI 丰富元数据，让 Agent 始终建立在真实业务数据之上。 |
-| **🔐 SQL 安全与 RLS** | 基于 group 的工具访问控制和执行前 SQL 治理，会通过行级安全、注入检测和查询复杂度控制保护业务数据库。 |
-| **🛠️ 灵活的集成能力** | QueryMind 可对接 OpenAI-compatible、Anthropic 和 vLLM 模型后端，以及 PostgreSQL、SQLite、Neo4j 等存储与数据系统。 |
+| **🔐 SQL 安全与 RLS** | 基于 group 的工具访问控制和执行前 SQL 治理，提供行级访问、注入检测和查询复杂度控制；生产安全仍需针对部署环境单独验证。 |
+| **🛠️ 灵活的集成能力** | 框架提供 OpenAI-compatible、Anthropic、vLLM 以及 PostgreSQL、SQLite、Neo4j 等集成；本 Fork 正式验证的主业务链路是 PostgreSQL。 |
 | **🗒️ 可观测性** | 指标、审计日志和评测工具，让 QueryMind 运行更容易监控、检查和复现。 |
 
 当 Agent 循环运行时，QueryMind 可以把进度更新、schema 结果、SQL 结果、图表、卡片和后续动作以流式方式返回前端，而不是只返回纯文本。
 
-## QueryMind 相比 Vanna 2.0 的新内容
+## 上游 QueryMind 相比 Vanna 2.0 的定位
 
 QueryMind 的灵感来自 [Vanna agent framework](https://github.com/vanna-ai/vanna)，并把 Vanna 的 webcomponents 改造成了定制化的 demo web 体验。
 
@@ -93,33 +112,38 @@ QueryMind 的灵感来自 [Vanna agent framework](https://github.com/vanna-ai/va
 ## QueryMind 的 Agent Loop
 ![QueryMind agent loop](docs/figures/components/agent-loop.png)
 
-## 工作方式
+## 当前工作方式
 
 ```mermaid
 sequenceDiagram
     participant U as 用户
     participant UI as QueryMind Chat UI
     participant API as FastAPI Server
+    participant R as Run Store
     participant A as Agent
     participant W as Workflows and Governance
     participant T as Tool Registry
     participant M as Memory and Storage
 
-    U->>UI: 提出 SQL 问题
-    UI->>API: POST /api/querymind/v1/chat_sse
-    API->>A: 解析 RequestContext 和 User
-    A->>W: 优先尝试 /init_schema 或 /schema_*
-    alt 命中工作流
-        W-->>UI: 流式返回结构化 UI 组件
-    else 继续 Agent loop
-        A->>T: 校验并执行工具
+    alt 当前可执行的 Chat 路径
+        U->>UI: 提出 SQL 问题
+        UI->>API: POST /api/querymind/v1/chat_sse
+        API->>A: 解析 RequestContext 和 User
+        A->>W: 优先尝试 /init_schema 或 /schema_*
+        W->>T: 需要时进入受治理的工具循环
         T->>M: 读写记忆、schema 知识和历史记录
         T-->>A: 返回结果、图表和产物
         A-->>UI: 流式输出响应片段
+    else v0.10-A1 生命周期路径
+        U->>API: POST /api/querymind/v1/agent-runs
+        API->>R: 幂等创建 queued Run
+        U->>API: 查询 Run / Events 或取消
+        API->>R: 隔离读取或原子状态变更
+        R-->>U: 返回脱敏快照和有序事件
     end
 ```
 
-QueryMind 把工作流边界显式化：请求上下文和管理员路由会先于工具执行完成，随后再以结构化 UI 组件流回前端。
+两条 API 路径目前尚未连通：Chat API 会执行现有的受治理单 Agent，v0.10-A1 Run API 目前只持久化生命周期状态。v0.10-A2 会让同一个 Agent 支持排队执行，不会为了追赶概念而引入没有评测收益的多 Agent 架构。
 
 ## 快速开始
 
@@ -213,6 +237,47 @@ python my_agent.py
 python webcomponent_demo.py --api-base http://127.0.0.1:8000
 ```
 
+### v0.10-A1 Agent Run API
+
+`my_agent.py` 会挂载 `FileSystemAgentRunStore`。脱敏的 Run 快照和有序事件默认保存在项目数据目录下的 `agent_runs` 中；可通过 `QUERYMIND_AGENT_RUNS_DIR` 指定其他本地开发路径。
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/querymind/v1/agent-runs \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: demo-request-001' \
+  -d '{"question":"哪些艺术家的销售额最高？","database_id":"chinook"}'
+
+RUN_ID='replace-with-run-id'
+curl "http://127.0.0.1:8000/api/querymind/v1/agent-runs/${RUN_ID}"
+curl "http://127.0.0.1:8000/api/querymind/v1/agent-runs/${RUN_ID}/events?after=0"
+curl -X POST "http://127.0.0.1:8000/api/querymind/v1/agent-runs/${RUN_ID}/cancel" \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_version":1}'
+```
+
+创建请求必须携带 `Idempotency-Key`。同一个键和同一个请求会返回原 Run；同一个键对应不同请求时返回 `409`。读取范围由服务端解析出的租户和用户决定。这个 API **目前不会执行问题**，所以新 Run 会停留在 `queued`，直到 v0.10-A2 接入后台执行器。
+
+### 验证
+
+```bash
+.venv/bin/python -m pytest tests
+```
+
+当前正式维护的 Python 测试结果为 `229 passed, 1 warning`。命令需要显式指定 `tests`：`frontends/webcomponent/test_backend.py` 是手工组件演示后端，其中以 `test_*` 命名的生成器会被仓库级裸 `pytest` 误收集。
+
+## 评测与迭代证据
+
+| 版本 | 个人版工作 | 结论 |
+|---|---|---|
+| v0.2-v0.4 | 24 题 AdventureWorks 确定性评测、失败归因和 S0/S1/S2 Agent 价值对照 | S2 单轮业务准确率 54.17%，但 P95 延迟 53.13 秒，不能直接设为默认 |
+| v0.5 | 自适应 Query Plan 路由 | 两轮业务准确率均为 62.50%，P95 降至 38.16/43.78 秒，但逐题结果并不完全稳定 |
+| v0.6 | 结构化恢复和高风险 SQL Reviewer 实验 | 没有提升，成本和延迟上升，因此默认关闭并保留负面实验记录 |
+| v0.7 | 与数据源绑定、带版本的业务指标语义契约 | AdventureWorks S5 单轮业务准确率 66.67%，不作为跨库保证 |
+| v0.8-v0.9 | 多数据源隔离、Chinook 准入和 100 题扩展计划 | Chinook 24 题开发运行中 S5 为 83.33%；100 题集目前只完成并验证 50 条参考 SQL，尚无 50 题 Agent 准确率 |
+| v0.10-A1 | Run/Event 生命周期、幂等、隔离、事件游标、版本与取消 | 状态契约已实现，Agent 后台执行仍待 A2 |
+
+完整的实验方法和各版本证据见 [portfolio 文档](docs/portfolio/)与[评测支持文档](docs/zh/support/evaluation.md)；本地评测产物会继续记录逐题 SQL、错误位置、原因和改进建议。表里的数字只描述对应的一次受控实验，不代表任意数据源上的准确率保证。
+
 ### Web Component
 
 ```html
@@ -236,23 +301,24 @@ python webcomponent_demo.py --api-base http://127.0.0.1:8000
 
 ### 进行中
 
-1. 围绕 AdventureWorks micro-benchmark 持续迭代，分析 tool-call 链路、prompt injection 模式和常见 SQL 失败模式。
+1. 完成 v0.10-A2：让现有单 Agent 支持排队 Run 执行、实时 SSE 续读、重启恢复和并发取消；随后增加脱敏的 Step/Tool Trace，但不改变 SQL 生成策略。
 
 <figure>
   <img src="docs/figures/use-cases/eval-driven%20iterations.png" alt="评测驱动迭代" />
   <figcaption>评测驱动迭代：利用基准测试反馈持续优化提示词、治理策略和 SQL 恢复行为。</figcaption>
 </figure>
 
-2. 基于 BIRD-SQL 评估 QueryMind 的 text-to-SQL 能力。
+2. 在运行时事件契约稳定前，将 Chinook 评测集暂停在 50/100。之后继续执行 [v0.9 计划](docs/portfolio/v0.9-production-benchmark.md)，冻结 60/20/20 开发集、测试集和留出集，再进行多轮真实模型评测。
 
 
 ### 未来计划
 
-1. 在 QueryMind 之上探索 Agentic RL。
-2. 优化 schema retrieval 的 query 改写逻辑，让复杂的用户问题可以拆成多次 schema-retrieve 调用，减少多表 / 多字段描述被压缩成单句 query 后陷入检索 dead-end 的概率。
-3. 探索替代性的 schema retrieval / indexing 架构，包括 PageIndex 风格的推理优先、轻向量或无向量 RAG 范式，以及更强的基于业务 schema 图的多跳检索。
-4. 增加业务层面的收敛选项，例如人工选择业务领域，在检索开始前先缩小 schema-retrieve 的搜索范围。
-5. 持续结合评测结果和治理反馈打磨 Agent。
+1. 核对最新官方数据、许可证、格式和评分方式后，再使用 BIRD-SQL 评估 Text2SQL 能力。
+2. 只有在可靠的多数据源评测基线建立后，才探索 Agentic RL。
+3. 优化 schema retrieval 的 query 改写逻辑，让复杂问题可以拆成多次 schema-retrieve 调用，降低多表、多字段描述被压缩后检索失败的概率。
+4. 探索 PageIndex 风格、轻向量或无向量 RAG，以及基于业务 Schema 图的多跳检索。
+5. 增加人工选择业务域等收敛选项，在检索前缩小 Schema 搜索范围。
+6. 持续使用评测结果和治理反馈优化 Agent。
 
 <a id="license"></a>
 

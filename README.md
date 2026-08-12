@@ -1,6 +1,6 @@
 # QueryMind: Build SQL Agents for Real-World Business Databases
 
-QueryMind is an agent framework for building LLM-powered agents specialized in real-world Text2SQL Tasks with agentic retrieval capabilities and enterprise-grade security.
+QueryMind is a governed Text2SQL agent for business-data questions. It combines schema-grounded planning, SQL safety controls, evaluation, and auditable run state on top of the upstream QueryMind framework.
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://python.org)
 [![README_zh](https://img.shields.io/badge/README-简体中文-0ea5e9.svg)](README_zh.md)
@@ -8,18 +8,33 @@ QueryMind is an agent framework for building LLM-powered agents specialized in r
 
 ## Enterprise Portfolio Edition
 
-This fork is maintained by [luyan9513](https://github.com/luyan9513) as an enterprise analytics portfolio project. It keeps QueryMind's upstream agent, schema-memory, and SQL-governance foundation while adding a verified local business-data workflow and independently maintained improvements:
+This fork is maintained by [luyan9513](https://github.com/luyan9513) as an enterprise analytics portfolio project. Its target users are analysts and business operators who need governed, explainable answers from relational data rather than unrestricted SQL generation.
+
+It reuses the upstream QueryMind Agent Loop, Schema Memory, SQL Governance, RLS, and web components. The portfolio work focuses on environment delivery, model adaptation, correctness evaluation, multi-source isolation, semantic controls, recovery experiments, and a durable Run/Event contract:
 
 - DeepSeek for the main agent, with SiliconFlow-backed Mem0 LLM and `BAAI/bge-m3` embeddings.
 - Read-only PostgreSQL PK/FK extraction through `pg_catalog`, including composite and cross-schema relationships.
 - Persistent LLM-generated conversation titles, automatic history refresh, workflow message storage, and graceful fallback.
 - A 24-case Chinese AdventureWorks business benchmark with deterministic full-result checks, Schema Recall, first-attempt metrics, failure attribution, trace redaction, and an interactive HTML report.
 - Database-scoped Schema Memory retrieval plus an independent Chinook benchmark and 12-metric catalog for second-source admission; the v0.9 development set has reached 50/100 cases.
-- AdventureWorks validation across 68 tables and 456 fields, plus an initialized 11-table Chinook source; the current formal test scope is `229 passed, 1 warning`.
+- A bounded Agent Run/Event lifecycle with idempotent creation, tenant/user-scoped reads, ordered event cursors, optimistic versions, cancellation, and an atomic single-process development store.
+- AdventureWorks validation across 68 tables and 456 fields, plus an initialized 11-table Chinook source; the current formal Python test scope is `229 passed, 1 warning`.
 
-See [Portfolio Ownership and Evidence](docs/portfolio/ownership.md) for the upstream boundary, personal contributions, verification evidence, and roadmap.
+### Current evidence and boundaries
 
-https://github.com/user-attachments/assets/e87fc532-ef82-4765-96a7-e693924de5c7
+| Area | Verified evidence | Boundary |
+|---|---|---|
+| AdventureWorks delivery | PostgreSQL read-only workflow, 68 tables, 456 fields, Schema Memory initialized | Local development environment, not a production deployment |
+| Text2SQL evaluation | Frozen 24-case deterministic benchmark, S0-S5 comparisons, per-case SQL and failure attribution | Results apply only to recorded datasets, snapshots, models, and settings |
+| Multi-source support | AdventureWorks plus an independent 11-table Chinook admission path | A new source still requires schema initialization, semantic definitions, and its own benchmark |
+| Governed Agent runtime | Existing Chat Agent plus v0.10-A1 Run/Event state contract | The Run API currently creates queued state; background execution, live SSE, approval recovery, and multi-instance storage are not implemented yet |
+| Automated verification | `229 passed, 1 warning` | Python test suite; it is not a production availability or concurrency claim |
+
+Accuracy is measured, not promised universally. QueryMind uses repeatable admission gates to establish an accuracy range for each data source and version instead of claiming that one benchmark guarantees future databases.
+
+See [Portfolio Ownership and Evidence](docs/portfolio/ownership.md), [Portfolio Changelog](CHANGELOG_PORTFOLIO.md), and [v0.10 Runtime Design](docs/portfolio/v0.10-governed-agent-runtime.md) for traceable implementation evidence and roadmap.
+
+[▶ View the project demo recording](https://github.com/user-attachments/assets/e87fc532-ef82-4765-96a7-e693924de5c7)
 
 <table>
   <tr>
@@ -54,21 +69,23 @@ https://github.com/user-attachments/assets/e87fc532-ef82-4765-96a7-e693924de5c7
 
 ---
 
-## 🌟 Core Features
+## 🌟 Upstream Foundation and Portfolio Extensions
+
+The capability table below describes the combined system. The ownership links above distinguish upstream code from independently implemented or validated portfolio work.
 
 | Feature | Description |
 |---------|-------------|
 | **🗄️Multi-layer memory planes** | conversation storage, agent memory, and schema memory are independent, which keeps history, retrieval, and schema knowledge from bleeding into each other. |
 | **🎛️4 Schema Memory Search Modes** | hybrid / vector / graph / expand - 4 modes allow the agent choose suitable schema retrieval strategy for each query through agentic decision-making. |
 | **🧮Schema Management** | UI pages and commands make business database metadata easier to maintain, update, manually refine, and enrich with AI, keeping the agent grounded in real-world business data. |
-| **🔐SQL safety and RLS** | group-aware tool access and pre-execution SQL governance protect business databases with row-level security, injection detection, and query complexity controls. |
-| **🛠️Integration flexibility** | QueryMind works with OpenAI-compatible, Anthropic, and vLLM model backends, plus PostgreSQL, SQLite, and Neo4j-backed storage and data integrations. |
+| **🔐SQL safety and RLS** | group-aware tool access and pre-execution SQL governance provide row-level access, injection detection, and query complexity controls. Production security still requires deployment-specific validation. |
+| **🛠️Integration flexibility** | The framework includes OpenAI-compatible, Anthropic, and vLLM model integrations plus PostgreSQL, SQLite, and Neo4j-backed components. This fork has formally validated its main workflow on PostgreSQL. |
 | **🗒️Operational visibility** | metrics, audit logs, and evaluation tools make QueryMind runs easier to monitor, inspect, and reproduce. |
 
 When the loop runs, QueryMind can stream progress updates, schema results, SQL results, charts, cards, and follow-up actions back to the frontend instead of returning plain text only.
 
 
-## 🏗️ What is New in QueryMind compared to Vanna 2.0
+## 🏗️ Upstream QueryMind Positioning Compared with Vanna 2.0
 
 💡QueryMind is inspired by [Vanna's agent framework](https://github.com/vanna-ai/vanna) and adapts Vanna's webcomponents into a customized demo web experience.
 
@@ -96,31 +113,38 @@ It builds on that foundation with differences in runtime structure, governance, 
 ## 🔄 QueryMind's Agent Loop
 ![QueryMind agent loop](docs/figures/components/agent-loop.png)
 
-## 🧠 How It Works
+## 🧠 How It Works Today
 
 ```mermaid
 sequenceDiagram
     participant U as User
     participant UI as QueryMind Chat UI
     participant API as FastAPI Server
+    participant R as Run Store
     participant A as Agent
     participant W as Workflows and Governance
     participant T as Tool Registry
     participant M as Memory and Storage
 
-    U->>UI: Ask a SQL question
-    UI->>API: POST /api/querymind/v1/chat_sse
-    API->>A: Resolve RequestContext and User
-    A->>W: Try /init_schema or /schema_* first
-    alt Workflow handled
-        W-->>UI: Stream rich UI components
-    else Continue agent loop
-        A->>T: Validate and execute tools
+    alt Current executable Chat path
+        U->>UI: Ask a SQL question
+        UI->>API: POST /api/querymind/v1/chat_sse
+        API->>A: Resolve RequestContext and User
+        A->>W: Try /init_schema or /schema_* first
+        W->>T: Continue governed tool loop when needed
         T->>M: Read/write memory, schema knowledge, and history
         T-->>A: Results, charts, and artifacts
         A-->>UI: Stream response chunks
+    else v0.10-A1 lifecycle path
+        U->>API: POST /api/querymind/v1/agent-runs
+        API->>R: Create an idempotent queued Run
+        U->>API: GET Run / Events or POST Cancel
+        API->>R: Scoped read or atomic transition
+        R-->>U: Redacted snapshot and ordered events
     end
 ```
+
+The two API paths are not yet connected: the Chat API executes the existing governed single Agent, while the v0.10-A1 Run API currently persists lifecycle state only. v0.10-A2 will adapt that same Agent to queued execution; it does not introduce an unproven multi-Agent architecture.
 
 ## Get Started
 
@@ -213,6 +237,34 @@ The same modes are exposed through the `querymind` console script and the reposi
 python my_agent.py
 python webcomponent_demo.py --api-base http://127.0.0.1:8000
 ```
+
+### v0.10-A1 Agent Run API
+
+`my_agent.py` mounts a `FileSystemAgentRunStore`. By default, its redacted Run snapshots and ordered events are stored under the project data directory in `agent_runs`; set `QUERYMIND_AGENT_RUNS_DIR` to choose another local development path.
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/querymind/v1/agent-runs \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: demo-request-001' \
+  -d '{"question":"Which artists have the highest sales?","database_id":"chinook"}'
+
+RUN_ID='replace-with-run-id'
+curl "http://127.0.0.1:8000/api/querymind/v1/agent-runs/${RUN_ID}"
+curl "http://127.0.0.1:8000/api/querymind/v1/agent-runs/${RUN_ID}/events?after=0"
+curl -X POST "http://127.0.0.1:8000/api/querymind/v1/agent-runs/${RUN_ID}/cancel" \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_version":1}'
+```
+
+Creation requires an `Idempotency-Key`. Repeating the same request returns the existing Run; reusing the key for a different request returns `409`. Reads are scoped to the server-resolved tenant and user. This API does **not** execute the question yet, so a newly created Run remains `queued` until v0.10-A2 connects a worker.
+
+### Verification
+
+```bash
+.venv/bin/python -m pytest tests
+```
+
+The maintained Python suite currently reports `229 passed, 1 warning`. Use the explicit `tests` path: `frontends/webcomponent/test_backend.py` is a manual component demo whose `test_*` generator names are otherwise collected by a repository-wide bare `pytest` command.
 
 ### v0.2 Text2SQL Evaluation
 
