@@ -1,12 +1,12 @@
-# QueryMind Enterprise：项目归属与证据说明
+# QueryMind Data Agent：项目归属与证据说明
 
 ## 项目定位
 
-这是由 luyan9513 持续维护的企业经营数据问答项目，面向 AI 应用开发与 AI 产品方向。项目以开源 QueryMind 为技术基线，个人负责完整落地、国内模型链路、Schema 图修复、会话产品化、测试验收和后续版本路线。
+这是由 luyan9513 持续维护的企业经营数据问答项目，面向销售、运营、分析人员和数据管理者。项目以开源 QueryMind 为技术基线，维护者负责完整落地、国内模型链路、Schema 图修复、会话产品化、测试验收和后续版本路线。
 
 上游仓库：<https://github.com/Tangxihong0922/QueryMind>
 
-个人仓库：<https://github.com/luyan9513/QueryMind-Enterprise>
+个人仓库：<https://github.com/luyan9513/querymind-data-agent>
 
 ## 能力边界
 

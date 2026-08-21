@@ -6,11 +6,11 @@ QueryMind 是一个面向企业经营数据问答的可治理 Text2SQL Agent。�
 [![README_EN](https://img.shields.io/badge/README-English%20version-0ea5e9.svg)](README.md)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-## 企业经营数据问答个人版
+## 企业经营数据问答扩展版
 
 本 Fork 由 [luyan9513](https://github.com/luyan9513) 持续维护，目标用户是需要从关系型数据库获得可靠答案、但不能直接放任模型执行 SQL 的分析人员和业务人员。
 
-项目复用 QueryMind 上游已有的 Agent Loop、Schema Memory、SQL Governance、RLS 和 Web Component。个人改造聚焦环境落地、模型适配、准确率评测、多数据源隔离、业务语义约束、失败恢复实验和持久化 Run/Event 契约：
+项目复用 QueryMind 上游已有的 Agent Loop、Schema Memory、SQL Governance、RLS 和 Web Component。下游改造聚焦环境落地、模型适配、准确率评测、多数据源隔离、业务语义约束、失败恢复实验和持久化 Run/Event 契约：
 
 - 主 Agent 使用 DeepSeek，Mem0 LLM 与 `BAAI/bge-m3` Embedding 接入硅基流动。
 - 在只读 PostgreSQL 账号下通过 `pg_catalog` 抽取主外键，支持复合外键和跨 Schema 关系。
@@ -32,7 +32,7 @@ QueryMind 是一个面向企业经营数据问答的可治理 Text2SQL Agent。�
 
 本项目不会承诺任意数据库都达到固定准确率，而是通过可重复的数据源准入门槛，为每个数据源和版本建立可解释的准确率范围。
 
-上游边界、个人贡献和验证证据见[项目归属与证据说明](docs/portfolio/ownership.md)、[个人版变更记录](CHANGELOG_PORTFOLIO.md)和 [v0.10 运行时设计](docs/portfolio/v0.10-governed-agent-runtime.md)。
+上游边界、个人贡献和验证证据见[项目归属与证据说明](docs/portfolio/ownership.md)、[项目变更记录](CHANGELOG_PORTFOLIO.md)和 [v0.10 运行时设计](docs/portfolio/v0.10-governed-agent-runtime.md)。
 
 [▶ 查看项目演示录像](https://github.com/user-attachments/assets/e87fc532-ef82-4765-96a7-e693924de5c7)
 
@@ -69,7 +69,7 @@ QueryMind 是一个面向企业经营数据问答的可治理 Text2SQL Agent。�
 
 ---
 
-## 🌟 上游基础与个人版扩展
+## 🌟 上游基础与下游扩展
 
 下表描述的是组合后的完整系统。哪些来自上游、哪些属于个人开发或验证，以前面的归属文档为准。
 

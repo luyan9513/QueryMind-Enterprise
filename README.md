@@ -6,11 +6,11 @@ QueryMind is a governed Text2SQL agent for business-data questions. It combines 
 [![README_zh](https://img.shields.io/badge/README-简体中文-0ea5e9.svg)](README_zh.md)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-## Enterprise Portfolio Edition
+## Enterprise Data Agent Edition
 
-This fork is maintained by [luyan9513](https://github.com/luyan9513) as an enterprise analytics portfolio project. Its target users are analysts and business operators who need governed, explainable answers from relational data rather than unrestricted SQL generation.
+This fork is maintained by [luyan9513](https://github.com/luyan9513) as an enterprise analytics data-agent project. Its target users are analysts and business operators who need governed, explainable answers from relational data rather than unrestricted SQL generation.
 
-It reuses the upstream QueryMind Agent Loop, Schema Memory, SQL Governance, RLS, and web components. The portfolio work focuses on environment delivery, model adaptation, correctness evaluation, multi-source isolation, semantic controls, recovery experiments, and a durable Run/Event contract:
+It reuses the upstream QueryMind Agent Loop, Schema Memory, SQL Governance, RLS, and web components. The downstream work focuses on environment delivery, model adaptation, correctness evaluation, multi-source isolation, semantic controls, recovery experiments, and a durable Run/Event contract:
 
 - DeepSeek for the main agent, with SiliconFlow-backed Mem0 LLM and `BAAI/bge-m3` embeddings.
 - Read-only PostgreSQL PK/FK extraction through `pg_catalog`, including composite and cross-schema relationships.
@@ -32,7 +32,7 @@ It reuses the upstream QueryMind Agent Loop, Schema Memory, SQL Governance, RLS,
 
 Accuracy is measured, not promised universally. QueryMind uses repeatable admission gates to establish an accuracy range for each data source and version instead of claiming that one benchmark guarantees future databases.
 
-See [Portfolio Ownership and Evidence](docs/portfolio/ownership.md), [Portfolio Changelog](CHANGELOG_PORTFOLIO.md), and [v0.10 Runtime Design](docs/portfolio/v0.10-governed-agent-runtime.md) for traceable implementation evidence and roadmap.
+See [Ownership and Evidence](docs/portfolio/ownership.md), [Project Changelog](CHANGELOG_PORTFOLIO.md), and [v0.10 Runtime Design](docs/portfolio/v0.10-governed-agent-runtime.md) for traceable implementation evidence and roadmap.
 
 [▶ View the project demo recording](https://github.com/user-attachments/assets/e87fc532-ef82-4765-96a7-e693924de5c7)
 
@@ -69,9 +69,9 @@ See [Portfolio Ownership and Evidence](docs/portfolio/ownership.md), [Portfolio 
 
 ---
 
-## 🌟 Upstream Foundation and Portfolio Extensions
+## 🌟 Upstream Foundation and Downstream Extensions
 
-The capability table below describes the combined system. The ownership links above distinguish upstream code from independently implemented or validated portfolio work.
+The capability table below describes the combined system. The ownership links above distinguish upstream code from independently implemented or validated downstream work.
 
 | Feature | Description |
 |---------|-------------|
@@ -268,7 +268,7 @@ The maintained Python suite currently reports `229 passed, 1 warning`. Use the e
 
 ### v0.2 Text2SQL Evaluation
 
-The upstream project already provided the evaluation runner, resumable batch CLI, SQL executor, LLM judge, and basic/expansion datasets. This portfolio fork extends that foundation with a Chinese business benchmark and deterministic enterprise metrics.
+The upstream project already provided the evaluation runner, resumable batch CLI, SQL executor, LLM judge, and basic/expansion datasets. This fork extends that foundation with a Chinese business benchmark and deterministic enterprise metrics.
 
 ```bash
 cd /Users/luyan/Documents/Projects/01-QueryMind/repo/QueryMind-personal
@@ -301,8 +301,8 @@ The final three-case DeepSeek v4 Pro smoke run reached 100.00% strict/business c
 The v0.4 harness now isolates three evaluation strategies without changing the production chat entry point:
 
 - `s0`: one fixed-budget Schema Memory retrieval, one LLM SQL generation, and one governed SQL attempt; no Agent Loop or repair.
-- `s1`: the upstream Agent Loop, SQL Governance, Schema Memory, and recovery, without registering the portfolio Query Plan tool.
-- `s2`: the same Agent path with the portfolio Query Plan evidence gate enabled.
+- `s1`: the upstream Agent Loop, SQL Governance, Schema Memory, and recovery, without registering the downstream Query Plan tool.
+- `s2`: the same Agent path with the downstream Query Plan evidence gate enabled.
 
 Each checkpoint stores its mode, and resume lookup refuses to mix modes. Reports now include P50/P95/max latency, per-tool totals, 95% Wilson intervals, wrong-but-executed rate, Recovery Yield, False Block Rate, and Plan Acceptance Precision. A separate comparison command rejects A/B claims when the dataset, model, database, judge, temperature, concurrency, or test-case IDs differ.
 

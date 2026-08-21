@@ -1,6 +1,6 @@
-# Portfolio Changelog
+# Project Changelog
 
-This file tracks changes maintained in `luyan9513/QueryMind-Enterprise` on top of the upstream QueryMind project.
+This file tracks changes maintained in `luyan9513/querymind-data-agent` on top of the upstream QueryMind project.
 
 ## Unreleased v0.10 (development)
 
