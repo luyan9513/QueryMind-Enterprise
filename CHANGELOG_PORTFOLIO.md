@@ -2,14 +2,26 @@
 
 This file tracks changes maintained in `luyan9513/querymind-data-agent` on top of the upstream QueryMind project.
 
-## Unreleased v0.10 (development)
+## Unreleased v0.10
 
 ### Added
 
 - A bounded Agent-run lifecycle model with eight states, explicit transition rules, optimistic versions, terminal timestamps, and ordered redacted events.
 - An `AgentRunStore` boundary with async-safe memory tests and an atomic JSON development adapter that survives process restart without storing raw idempotency keys.
 - Versioned create/get/events/cancel APIs under `/api/querymind/v1/agent-runs`, including mandatory idempotency keys, request-conflict detection, tenant/user scoping, incremental event cursors, and idempotent cancellation.
-- The normal local launcher now mounts the file Agent-run store through `QUERYMIND_AGENT_RUNS_DIR`; existing chat endpoints and Text2SQL behavior are unchanged.
+- A process-local background executor that drives the existing Chat Agent, recovers queued Runs, fails closed on interrupted running work, and cooperates with cancellation.
+- Live resumable SSE events, a shared trace ID, centrally redacted model/tool/Agent events, and process traces in evaluation artifacts.
+- Persisted approval, rejection, clarification, and feedback flows with optimistic versions and tenant/user authorization; each human decision and state transition is atomic, and concurrent feedback uses append semantics.
+- Stable runtime fault categories plus timeout fault injection, concurrent idempotency, and approval/cancellation race tests.
+- A frozen 100-case Chinook benchmark with 60/20/20 splits, read-only reference validation, repeated-run quality gates, and a quality-assessment CLI.
+- Comparable-run admission that fails closed when model, dataset, database snapshot, Schema snapshot, or another controlled setting is missing or differs.
+- Cycle-safe dataset includes and dataset-scoped advisory SQL-shape checks, while business columns, filters, projections, and forbidden operations remain blocking.
+- The normal local launcher mounts the file Agent-run store through `QUERYMIND_AGENT_RUNS_DIR`; existing chat endpoints remain compatible.
+- Schema-derived `grain_keys`, conservative joined-entity distinct counts, explicit `partition_limit` checks, unplanned business-filter rejection, and actionable Query Plan repair hints.
+- Chinook semantic catalog 1.0.1 adds a playlist bridge-table metric and source-owned support-representative relationship notes.
+- Evaluation now selects the last successfully executed SQL before falling back to a rejected attempt.
+- Deterministic runtime Result Validation checks accepted-plan output shape, alias-equivalent column order, row limits, scalar aggregation, observable grain, empty results, and required Semantic Contract status without persisting result values.
+- The Run executor emits `result.validated` only for a passed latest successful SQL result; missing, failed, or inconclusive evidence emits `result.validation_failed` and fails the Run closed with stable error codes.
 
 ### Documented
 
@@ -20,15 +32,25 @@ This file tracks changes maintained in `luyan9513/querymind-data-agent` on top o
 
 ### Limits
 
-- v0.10-A1 only creates queued lifecycle records; no worker currently executes the existing Chat Agent from a Run.
-- Event history supports cursor reads but not a live SSE wait loop. Step/Tool persistence, unified tracing, resumable approvals, feedback, and online KPI collection are not implemented.
-- The atomic file adapter is single-process development storage, not a multi-instance transactional store.
-- The v0.9 benchmark remains at 50/100 and has no 50-case real-model accuracy result; expansion resumes after the runtime event contract is stable.
+- The executor and atomic file adapter are single-process development components, not a distributed queue or multi-instance transactional store.
+- Result Validation proves observable structure, not business-value correctness; the final P0-C candidate passes accuracy/error gates but still misses P95 and repeat-consistency gates.
+- Interrupted `running` work fails closed because exact post-SQL replay is not yet safe; only queued work is resubmitted at startup.
+- Trace stages are persisted as ordered events rather than normalized Step/Tool database tables; production authentication, leases, rate limits, and SLOs remain out of scope.
+- A deployer must provide a risk policy to trigger approvals; absolute security blocks cannot be overridden.
+- The 3-case smoke only validates the repaired path and is not used as the release accuracy number.
 
 ### Verified
 
-- Focused Agent-run/store/API/history scope: `10 passed, 1 warning`.
-- Formal Python scope: `229 passed, 1 warning`; focused Ruff and `git diff --check` passed.
+- 20 concurrent creates with one idempotency key produce one Run; approval/cancel races allow one winner; cross-user decisions return 404.
+- Timeout injection terminates as `provider_transient`; live SSE closes with `[DONE]`; persisted events redact credentials and row values.
+- Chinook coverage has no profile deficit and all 100 reference SQL statements execute successfully in read-only validation.
+- Corrected 3-case real-model smoke: 100% business correctness, 100% Agent SQL execution, 0% wrong-executed, and 100% process-trace coverage. This is not the release accuracy number.
+- Three comparable 100-case real-model runs: 65%/69%/69% business accuracy, 67.67% mean business accuracy, 19.00% mean wrong-executed rate, 81.00% per-case consistency, and 18.846-second maximum P95 latency.
+- The automated admission result is `NOT READY`: reference SQL, Schema Recall, answer coverage, latency, and Trace coverage passed; business accuracy, wrong-executed rate, and repeat consistency failed.
+- Formal Python scope: `245 passed, 1 warning`; focused Ruff and `git diff --check` passed.
+- v0.10.1 dual-source iteration: `269 passed, 1 warning`; contract audits and reference SQL pass Chinook 100/100 and AdventureWorks 24/24. Chinook S5 repeated admission averages 79.00% business accuracy and remains `NOT READY`; AdventureWorks averages 86.11% with 6.94% wrong-but-executed and passes the predefined 24-case cross-source regression gate. The interrupted HTTP 402 run was isolated and replaced by a fresh run from case zero.
+- v0.10.2 retained quality snapshot: joined-count DISTINCT preservation and the single-table `COUNT(*)` false-block fix pass `272` formal Python tests. Three comparable Chinook S5 runs average 84.67% business accuracy and 9.00% wrong-but-executed; maximum P95 is 31.74 seconds and consistency is 83.00%, so admission remains `NOT READY`. A targeted 3/3 plan-aggregation experiment regressed the full benchmark to 82.33% business accuracy and 11.67% wrong-but-executed, so its code was reverted while the negative reports were retained. All measurable P0-B model runs cost $1.302927 under the approved $5 cap.
+- P0-C Result Validation passes `283` formal Python tests, focused Ruff, whitespace checks, and a read-only Chinook PostgreSQL smoke. Three complete final-candidate 100-case runs reached 84%/82%/84% business accuracy and 9%/12%/8% wrong-but-executed; means are 83.33% and 9.67%. Accuracy/error gates passed, while 76.01-second maximum P95 and 84% consistency did not. A separate provider-error run was isolated and is not aggregated. P0-C measurable model cost is $0.799147, bringing P0-B plus P0-C to $2.102074 under the approved $5 cap.
 
 ## Unreleased v0.9 (development)
 

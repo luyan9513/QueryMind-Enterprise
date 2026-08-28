@@ -51,6 +51,50 @@ def _make_agent_result(tool_names: list[str], final_answer: str) -> AgentResult:
     )
 
 
+def test_primary_sql_prefers_last_success_over_later_rejected_attempt() -> None:
+    result = AgentResult(
+        test_case_id="sql_test",
+        database_id="adventureworks",
+        conversation_id="conv-1",
+        user_id="u1",
+        tool_calls=[
+            ToolInvocationRecord(
+                tool_call_id="successful",
+                tool_name="run_sql",
+                arguments={"sql": "SELECT correct_result"},
+                success=True,
+            ),
+            ToolInvocationRecord(
+                tool_call_id="rejected",
+                tool_name="run_sql",
+                arguments={"sql": "SELECT diagnostic_attempt"},
+                success=False,
+            ),
+        ],
+    )
+
+    assert result.get_primary_sql() == "SELECT correct_result"
+
+
+def test_primary_sql_falls_back_to_last_attempt_when_none_executed() -> None:
+    result = AgentResult(
+        test_case_id="sql_test",
+        database_id="adventureworks",
+        conversation_id="conv-1",
+        user_id="u1",
+        tool_calls=[
+            ToolInvocationRecord(
+                tool_call_id="rejected",
+                tool_name="run_sql",
+                arguments={"sql": "SELECT rejected_attempt"},
+                success=False,
+            )
+        ],
+    )
+
+    assert result.get_primary_sql() == "SELECT rejected_attempt"
+
+
 def test_expected_outcome_tools_called_allows_key_path_subsequence() -> None:
     test_case = _make_test_case(
         ExpectedOutcome(

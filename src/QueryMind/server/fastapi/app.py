@@ -3,6 +3,7 @@ FastAPI server factory for QueryMind Agents.
 """
 
 import inspect
+import logging
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
@@ -10,11 +11,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from ..base import ChatHandler
+from ..base import AgentRunExecutor, ChatHandler
 from .agent_run_routes import register_agent_run_routes
 from .routes import register_chat_routes, register_metrics_routes, register_schema_routes
-
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +31,16 @@ class QueryMindFastAPIServer:
         self.agent = agent
         self.config = config or {}
         self.chat_handler = ChatHandler(agent)
+        run_store = getattr(agent, "agent_run_store", None)
+        self.agent_run_executor = (
+            AgentRunExecutor(
+                run_store,
+                self.chat_handler,
+                policy=getattr(agent, "agent_run_policy", None),
+            )
+            if run_store is not None
+            else None
+        )
 
     def _find_schema_memory_from_workflow(self):
         """Extract schema_memory from workflow_handler if available.
@@ -86,11 +95,17 @@ class QueryMindFastAPIServer:
         else:
             logger.info("No SchemaMemory found - use /init_schema command to initialize manually")
         
-        yield
-        
-        # Shutdown: cleanup SchemaMemory if found
-        if schema_mem is not None:
-            if hasattr(schema_mem, 'close'):
+        if self.agent_run_executor is not None:
+            await self.agent_run_executor.start()
+
+        try:
+            yield
+        finally:
+            if self.agent_run_executor is not None:
+                await self.agent_run_executor.stop()
+
+            # Shutdown: cleanup SchemaMemory if found
+            if schema_mem is not None and hasattr(schema_mem, 'close'):
                 try:
                     close_result = schema_mem.close()
                     if inspect.isawaitable(close_result):
@@ -153,6 +168,7 @@ class QueryMindFastAPIServer:
             app,
             self.agent,
             getattr(self.agent, "agent_run_store", None),
+            self.agent_run_executor,
         )
         register_metrics_routes(app, self.agent, self.config)
         register_schema_routes(app, self.agent, self.config)
@@ -173,8 +189,9 @@ class QueryMindFastAPIServer:
         Args:
             **kwargs: Arguments passed to uvicorn configuration
         """
-        import sys
         import asyncio
+        import sys
+
         import uvicorn
 
         # Check if we're in an environment with a running event loop FIRST

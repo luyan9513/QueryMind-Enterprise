@@ -9,6 +9,7 @@ from QueryMind.core.agent.semantic_contract import (
     SemanticContractCatalog,
     SemanticContractMode,
     SemanticMetricContract,
+    format_semantic_contracts_for_llm,
     load_semantic_contract_catalog,
     parse_semantic_contract_mode,
     validate_query_plan_semantic_contracts,
@@ -55,6 +56,16 @@ def _snapshot() -> dict:
     return {
         "semantic_contracts": _catalog().build_runtime_snapshot("采购总额")
     }
+
+
+def test_format_semantic_contracts_includes_data_source_notes() -> None:
+    snapshot = _catalog(
+        _metric(notes=["Use LEFT JOIN to preserve empty entities."])
+    ).build_runtime_snapshot("采购总额")
+
+    prompt = format_semantic_contracts_for_llm(snapshot)
+
+    assert "Data-source notes: Use LEFT JOIN to preserve empty entities." in prompt
 
 
 def _plan(**overrides) -> QueryPlan:
@@ -237,6 +248,116 @@ def test_sql_contract_accepts_metric_expression_inside_display_wrapper() -> None
         dialect="postgres",
     )
     assert accepted.passed
+
+
+def test_simple_metric_accepts_distinct_and_conditional_aggregate_variants() -> None:
+    metric = _metric(
+        id="sales.invoice_total",
+        name="销售总额",
+        aliases=["消费金额"],
+        description="Sum invoice totals.",
+        source_tables=["public.invoice"],
+        required_columns=["public.invoice.total"],
+        accepted_expressions=["SUM(total)"],
+        base_grain="one invoice",
+    )
+    snapshot = {
+        "semantic_contracts": _catalog(metric).build_runtime_snapshot("消费金额")
+    }
+    plan = _plan(
+        source_tables=["public.invoice"],
+        required_columns=["public.invoice.total"],
+        metric_expressions=[
+            "SUM(CASE WHEN invoice_year = 2024 THEN invoice.total ELSE 0 END)"
+        ],
+        semantic_contract_ids=["sales.invoice_total"],
+    )
+
+    plan_check = validate_query_plan_semantic_contracts(
+        plan,
+        snapshot,
+        mode="required",
+        dialect="postgres",
+    )
+    sql_check = validate_sql_against_semantic_contracts(
+        plan,
+        """
+        SELECT customer_id,
+               COALESCE(SUM(total) FILTER (WHERE invoice_year = 2024), 0) AS sales_total
+        FROM public.invoice
+        GROUP BY customer_id
+        """,
+        snapshot,
+        mode="required",
+        dialect="postgres",
+    )
+
+    assert plan_check.passed
+    assert sql_check.passed
+
+
+def test_simple_metric_relaxation_does_not_accept_arithmetic_formula_change() -> None:
+    metric = _metric(
+        id="sales.invoice_total",
+        name="销售总额",
+        aliases=["消费金额"],
+        description="Sum invoice totals.",
+        source_tables=["public.invoice"],
+        required_columns=["public.invoice.total"],
+        accepted_expressions=["SUM(total)"],
+        base_grain="one invoice",
+    )
+    snapshot = {
+        "semantic_contracts": _catalog(metric).build_runtime_snapshot("消费金额")
+    }
+    changed = _plan(
+        source_tables=["public.invoice"],
+        required_columns=["public.invoice.total"],
+        metric_expressions=["SUM(total * 2)"],
+        semantic_contract_ids=["sales.invoice_total"],
+    )
+
+    check = validate_query_plan_semantic_contracts(
+        changed,
+        snapshot,
+        mode="required",
+        dialect="postgres",
+    )
+
+    assert "contract_expression_missing_from_plan:sales.invoice_total" in check.issues
+
+
+def test_simple_metric_accepts_unquoted_numeric_localized_alias_in_plan() -> None:
+    metric = _metric(
+        id="sales.order_total",
+        name="订单金额",
+        aliases=["订单金额"],
+        description="Sum order total due.",
+        source_tables=["sales.salesorderheader"],
+        required_columns=["sales.salesorderheader.totaldue"],
+        accepted_expressions=["SUM(totaldue)"],
+        base_grain="one order",
+    )
+    snapshot = {
+        "semantic_contracts": _catalog(metric).build_runtime_snapshot("订单金额")
+    }
+    plan = _plan(
+        source_tables=["sales.salesorderheader"],
+        required_columns=["sales.salesorderheader.totaldue"],
+        metric_expressions=[
+            "SUM(CASE WHEN order_year = 2023 THEN totaldue ELSE 0 END) AS 2023年订单金额"
+        ],
+        semantic_contract_ids=["sales.order_total"],
+    )
+
+    check = validate_query_plan_semantic_contracts(
+        plan,
+        snapshot,
+        mode="required",
+        dialect="postgres",
+    )
+
+    assert check.passed
 
 
 def test_required_mode_blocks_aggregate_sql_without_a_plan() -> None:

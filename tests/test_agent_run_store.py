@@ -6,6 +6,7 @@ import pytest
 
 from QueryMind.core.agent_run import (
     AgentRunIdempotencyConflictError,
+    AgentRunInput,
     AgentRunNotFoundError,
     AgentRunStatus,
     AgentRunTransitionError,
@@ -187,5 +188,83 @@ def test_file_store_survives_reopen_and_keeps_events_ordered(tmp_path) -> None:
 
         index_text = (base_dir / "idempotency.json").read_text(encoding="utf-8")
         assert "secret-client-key" not in index_text
+
+    asyncio.run(_run())
+
+
+def test_concurrent_idempotency_and_decisions_are_atomic() -> None:
+    async def _run() -> None:
+        store = MemoryAgentRunStore()
+
+        async def create_once():
+            return await store.create_run(
+                tenant_id="tenant-a",
+                user_id="user-a",
+                database_id="chinook",
+                question_redacted="统计收入",
+                idempotency_key="same-key",
+                request_fingerprint="same-request",
+            )
+
+        created = await asyncio.gather(*(create_once() for _ in range(20)))
+        assert len({item[0].id for item in created}) == 1
+        assert sum(item[1] for item in created) == 1
+
+        run = created[0][0]
+        running = await store.transition_run(
+            run.id,
+            AgentRunStatus.RUNNING,
+            tenant_id="tenant-a",
+            user_id="user-a",
+            expected_version=1,
+        )
+        waiting = await store.transition_run(
+            run.id,
+            AgentRunStatus.WAITING_FOR_APPROVAL,
+            tenant_id="tenant-a",
+            user_id="user-a",
+            expected_version=running.version,
+        )
+
+        results = await asyncio.gather(
+            store.resolve_gate(
+                run.id,
+                AgentRunStatus.RUNNING,
+                AgentRunInput(
+                    question="统计收入",
+                    gate_resolved="approval",
+                    operator_decisions=[{"decision": "approve"}],
+                ),
+                tenant_id="tenant-a",
+                user_id="user-a",
+                stage="approval.approved",
+                expected_version=waiting.version,
+                event_type="approval.approved",
+            ),
+            store.transition_run(
+                run.id,
+                AgentRunStatus.CANCELLED,
+                tenant_id="tenant-a",
+                user_id="user-a",
+                expected_version=waiting.version,
+            ),
+            return_exceptions=True,
+        )
+        assert sum(not isinstance(item, Exception) for item in results) == 1
+        final = await store.get_run(
+            run.id,
+            tenant_id="tenant-a",
+            user_id="user-a",
+        )
+        assert final is not None
+        assert final.status in {AgentRunStatus.RUNNING, AgentRunStatus.CANCELLED}
+        stored_input = await store.get_run_input(
+            run.id,
+            tenant_id="tenant-a",
+            user_id="user-a",
+        )
+        assert len(stored_input.operator_decisions) == (
+            1 if final.status == AgentRunStatus.RUNNING else 0
+        )
 
     asyncio.run(_run())

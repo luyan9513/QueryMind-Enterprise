@@ -1,5 +1,5 @@
 data_source_id: adventureworks
-version: "1.0.0"
+version: "1.0.1"
 description: AdventureWorks metric catalog used to validate the generic semantic-contract engine.
 
 metrics:
@@ -25,7 +25,10 @@ metrics:
     owner: sales-analytics
     source_tables: [sales.salesorderheader]
     required_columns: []
-    accepted_expressions: [COUNT(*)]
+    accepted_expressions:
+      - COUNT(*)
+      - COUNT(salesorderid)
+      - COUNT(DISTINCT salesorderid)
     output_alias: order_count
     accepted_output_aliases: [订单数]
     base_grain: one sales order
@@ -82,7 +85,10 @@ metrics:
     owner: customer-analytics
     source_tables: [sales.customer]
     required_columns: []
-    accepted_expressions: [COUNT(*)]
+    accepted_expressions:
+      - COUNT(*)
+      - COUNT(customerid)
+      - COUNT(DISTINCT customerid)
     output_alias: customer_count
     accepted_output_aliases: [客户数量, 客户数]
     base_grain: one customer

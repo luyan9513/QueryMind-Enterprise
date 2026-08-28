@@ -6,27 +6,19 @@ This module contains the core Agent implementation and configuration.
 
 from .agent import Agent
 from .config import AgentConfig
+from .failure_recovery import (
+    FailureCategory,
+    FailureDecision,
+    FailureRecoveryState,
+    RecoveryAction,
+    build_failure_recovery_prompt,
+    classify_tool_failure,
+)
 from .governance import (
     SchemaGovernanceManager,
     SchemaGovernancePolicy,
     SchemaGovernanceStack,
     build_schema_governance_stack,
-)
-from .sql_governance import (
-    SqlGovernanceManager,
-    SqlGovernancePolicy,
-    SqlGovernanceProfile,
-    SqlGovernanceStack,
-    analyze_sql_text,
-    analyze_sql_shape,
-    build_sql_governance_profile,
-    build_sql_governance_prompt_block,
-    build_sql_governance_recap_block,
-    build_sql_governance_stack,
-    infer_profile_from_message,
-    parse_sql_governance_profile,
-    sql_governance_rejection_reason,
-    sql_semantics_rejection_reason,
 )
 from .query_plan import (
     QueryPlan,
@@ -41,22 +33,7 @@ from .query_plan import (
     validate_query_plan_intent,
     validate_sql_against_query_plan,
 )
-from .failure_recovery import (
-    FailureCategory,
-    FailureDecision,
-    FailureRecoveryState,
-    RecoveryAction,
-    build_failure_recovery_prompt,
-    classify_tool_failure,
-)
-from .sql_review import (
-    SqlIntentReview,
-    SqlReviewMode,
-    parse_sql_intent_review,
-    parse_sql_review_mode,
-    requires_sql_review,
-    sql_fingerprint,
-)
+from .result_validation import ResultValidationCheck, validate_query_result
 from .semantic_contract import (
     SemanticContractCatalog,
     SemanticContractCheck,
@@ -67,6 +44,30 @@ from .semantic_contract import (
     parse_semantic_contract_mode,
     validate_query_plan_semantic_contracts,
     validate_sql_against_semantic_contracts,
+)
+from .sql_governance import (
+    SqlGovernanceManager,
+    SqlGovernancePolicy,
+    SqlGovernanceProfile,
+    SqlGovernanceStack,
+    analyze_sql_shape,
+    analyze_sql_text,
+    build_sql_governance_profile,
+    build_sql_governance_prompt_block,
+    build_sql_governance_recap_block,
+    build_sql_governance_stack,
+    infer_profile_from_message,
+    parse_sql_governance_profile,
+    sql_governance_rejection_reason,
+    sql_semantics_rejection_reason,
+)
+from .sql_review import (
+    SqlIntentReview,
+    SqlReviewMode,
+    parse_sql_intent_review,
+    parse_sql_review_mode,
+    requires_sql_review,
+    sql_fingerprint,
 )
 
 __all__ = [
@@ -101,6 +102,8 @@ __all__ = [
     "validate_query_plan_evidence",
     "validate_query_plan_intent",
     "validate_sql_against_query_plan",
+    "ResultValidationCheck",
+    "validate_query_result",
     "FailureCategory",
     "FailureDecision",
     "FailureRecoveryState",

@@ -44,9 +44,17 @@ class DefaultSystemPromptBuilder(SystemPromptBuilder):
             "- Return exactly the dimensions and metrics the user requested. Do not add IDs, helper columns, diagnostic columns, or alternate time grains unless requested.",
             "- Preserve database numeric precision unless the user explicitly requests rounding or formatting.",
             "- For a base fact table with one row per requested entity and no row-multiplying join, count rows with `COUNT(*)`. Use `COUNT(DISTINCT key)` only when the user requests uniqueness or a join can duplicate the entity.",
+            "- When grouped rows represent a database entity, use that entity's retrieved primary key as a stable `grain_key` and GROUP BY it even if the key is not part of the requested output. Never group an entity only by a display name or label, because labels may not be unique.",
+            "- In a multi-table join, count entities with `COUNT(DISTINCT primary_key)` unless the metric explicitly counts joined rows. A later one-to-many join can otherwise multiply an earlier entity.",
+            "- Choose window semantics deliberately: use `ROW_NUMBER` with a stable tie-breaker when the request requires exactly one or exactly N rows per group; use `RANK` when ties share a rank and gaps are intended; use `DENSE_RANK` when ties share a rank without gaps. For `NTILE`, make group 1 correspond to the best/highest values unless the user states the opposite.",
+            "- For a top/bottom-per-group request, set `partition_limit` to the exact N. The request is incomplete until SQL computes a window rank and filters it to N; do not return every ranked row or use a MAX/MIN join that can return extra ties.",
+            "- Words such as every, each, all, 每个, 各, and 所有 require coverage of the full requested population. When related rows may be absent, start from that population and use LEFT JOIN plus zero/NULL handling instead of silently dropping empty entities.",
             "- For calendar day, month, quarter, or year buckets, return a date-like bucket rather than a timestamp unless the user explicitly asks for a timestamp (for PostgreSQL, cast `DATE_TRUNC` output to `date`).",
             "- Do not invent status, validity, date, or current-period filters. Add only filters supported by the request or an explicit business definition.",
-            "- Make ordered output deterministic by adding stable tie-breakers from the requested dimensions when needed.",
+            "- Prefer schema relationships that directly encode a business role over a guessed categorical label. Never invent a text literal for a status, title, or type; if such a literal is necessary but was not supplied by the user or a semantic contract, validate it from business data or ask for clarification.",
+            "- Conditional aggregates used for period or segment comparisons must define the missing-bucket policy explicitly. Use `ELSE 0` when absence means zero; preserve NULL only when that business meaning is intentional.",
+            "- Treat an unexpected zero-row result as a validation signal. Recheck unsupported filters, join direction, date boundaries, and NULL behavior before answering; do not repeatedly execute an unchanged query.",
+            "- Make ordered output deterministic. Whenever the primary ORDER BY expression can tie, append the retrieved stable grain key (or another requested unique identifier) as the final tie-breaker, including inside window functions and NTILE.",
             "",
             "Runtime context notices are authoritative; follow any message-side notices before these general rules.",
         ]
@@ -56,7 +64,7 @@ class DefaultSystemPromptBuilder(SystemPromptBuilder):
                 "Runtime context notices are authoritative; follow any message-side notices before these general rules."
             )
             prompt_parts[runtime_notice_index:runtime_notice_index] = [
-                "- After schema evidence is sufficient, call `submit_query_plan` before `run_sql`. Cite only retrieved physical tables and qualified columns; include every metric, join, filter, and output field in `required_columns`.",
+                "- After schema evidence is sufficient, call `submit_query_plan` before `run_sql`. Cite only retrieved physical tables and qualified columns; include every metric, join, filter, output field, and stable entity grain key in `required_columns`, and copy stable grouping identifiers into `grain_keys`.",
                 "- If `submit_query_plan` reports missing evidence, call `schema_retrieve` with `table_names` for known missing physical tables or `required_fields` for unknown tables, then submit a corrected plan. Never weaken the plan merely to pass validation.",
                 "- Generate SQL that matches the accepted plan exactly. Do not introduce an unplanned table, filter, output column, aggregation, or time grain.",
                 "",

@@ -1,6 +1,7 @@
 dataset:
-  name: "AdventureWorks 中文经营问答微基准 v0.2"
-  description: "24 条手工设计、可追溯的中文经营问题，覆盖销售、商品、客户、采购、库存和人力主题。"
+  name: "AdventureWorks 中文经营问答微基准 v0.2.1"
+  description: "24 条手工设计、可追溯的中文经营问题；v0.2.1 明确国家代码口径并消除非业务排序与实现方式误判。"
+  sql_contract_feature_mode: advisory
 
   test_cases:
     - id: "aw_zh_001"
@@ -197,6 +198,7 @@ dataset:
       tags: ["subquery", "multi_table", "ordering"]
       difficulty: "medium"
       metadata: {category: "subquery", source: "manual", query_language: "zh", business_domain: "product"}
+      result_comparison: {order_sensitive: false}
 
     - id: "aw_zh_010"
       database_id: "adventureworks"
@@ -216,6 +218,7 @@ dataset:
       tags: ["aggregation", "null_handling", "group_by", "ordering"]
       difficulty: "easy"
       metadata: {category: "null_handling", source: "manual", query_language: "zh", business_domain: "product"}
+      result_comparison: {order_sensitive: false}
 
     - id: "aw_zh_011"
       database_id: "adventureworks"
@@ -258,6 +261,7 @@ dataset:
       tags: ["aggregation", "join", "having", "null_handling"]
       difficulty: "medium"
       metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "inventory"}
+      result_comparison: {order_sensitive: false}
 
     - id: "aw_zh_013"
       database_id: "adventureworks"
@@ -280,6 +284,7 @@ dataset:
       tags: ["aggregation", "join", "filtering", "ordering"]
       difficulty: "easy"
       metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "purchasing"}
+      result_comparison: {order_sensitive: false}
 
     - id: "aw_zh_014"
       database_id: "adventureworks"
@@ -303,6 +308,7 @@ dataset:
       tags: ["aggregation", "join", "ordering"]
       difficulty: "easy"
       metadata: {category: "join", source: "manual", query_language: "zh", business_domain: "purchasing"}
+      result_comparison: {order_sensitive: false}
 
     - id: "aw_zh_015"
       database_id: "adventureworks"
@@ -325,6 +331,7 @@ dataset:
       tags: ["aggregation", "join", "null_handling", "date_filter"]
       difficulty: "medium"
       metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "purchasing"}
+      result_comparison: {order_sensitive: false}
 
     - id: "aw_zh_016"
       database_id: "adventureworks"
@@ -372,6 +379,7 @@ dataset:
       tags: ["aggregation", "filtering", "having", "ordering"]
       difficulty: "easy"
       metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "human_resources"}
+      result_comparison: {order_sensitive: false}
 
     - id: "aw_zh_018"
       database_id: "adventureworks"
@@ -417,6 +425,7 @@ dataset:
       tags: ["cte", "window", "time_series", "comparison"]
       difficulty: "medium"
       metadata: {category: "time_series", source: "manual", query_language: "zh", business_domain: "sales"}
+      result_comparison: {order_sensitive: false}
 
     - id: "aw_zh_020"
       database_id: "adventureworks"
@@ -444,6 +453,7 @@ dataset:
       tags: ["cte", "window", "time_series", "aggregation"]
       difficulty: "medium"
       metadata: {category: "window", source: "manual", query_language: "zh", business_domain: "sales"}
+      result_comparison: {order_sensitive: false}
 
     - id: "aw_zh_021"
       database_id: "adventureworks"
@@ -473,7 +483,7 @@ dataset:
     - id: "aw_zh_022"
       database_id: "adventureworks"
       dialect: "postgres"
-      query: "哪些销售区域本年累计销售额低于上一年？返回区域名称和两年的销售额。"
+      query: "使用销售区域表中的 SalesYTD 和 SalesLastYear 字段，找出本年累计销售额低于上一年的区域；返回区域名称、SalesYTD 和 SalesLastYear。"
       ground_truth_sql: |
         SELECT name AS territory_name, salesytd, saleslastyear
         FROM sales.salesterritory
@@ -496,7 +506,7 @@ dataset:
     - id: "aw_zh_023"
       database_id: "adventureworks"
       dialect: "postgres"
-      query: "按国家或地区统计客户数量，依据客户所属销售区域计算。"
+      query: "按国家或地区统计客户数量，依据客户所属销售区域计算；返回国家或地区代码和客户数。"
       ground_truth_sql: |
         SELECT st.countryregioncode, COUNT(*) AS customer_count
         FROM sales.customer AS c
@@ -513,11 +523,12 @@ dataset:
       tags: ["aggregation", "join", "ordering"]
       difficulty: "easy"
       metadata: {category: "aggregation", source: "manual", query_language: "zh", business_domain: "customer"}
+      result_comparison: {order_sensitive: false}
 
     - id: "aw_zh_024"
       database_id: "adventureworks"
       dialect: "postgres"
-      query: "比较各销售区域 2023 年和 2024 年的订单金额。"
+      query: "比较各销售区域 2023 年和 2024 年的订单金额；每个区域只返回一行，列为区域名称、2023 年订单金额和 2024 年订单金额。"
       ground_truth_sql: |
         SELECT st.name AS territory_name,
                SUM(CASE WHEN soh.orderdate >= DATE '2023-01-01' AND soh.orderdate < DATE '2024-01-01' THEN soh.totaldue ELSE 0 END) AS sales_2023,
@@ -533,9 +544,9 @@ dataset:
         required_features: ["aggregation", "group_by", "join", "case_when", "where", "order_by"]
         required_columns: ["orderdate", "totaldue", "territoryid"]
         required_filter_columns: ["orderdate"]
-        required_projection_aliases: ["sales_2023", "sales_2024"]
         min_projection_count: 3
         max_projection_count: 3
       tags: ["aggregation", "join", "case_when", "comparison", "date_filter"]
       difficulty: "medium"
       metadata: {category: "comparison", source: "manual", query_language: "zh", business_domain: "sales"}
+      result_comparison: {order_sensitive: false}

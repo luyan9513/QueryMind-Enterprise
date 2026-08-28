@@ -5,6 +5,7 @@ This module provides the main Agent class that orchestrates the interaction
 between LLM services, tools, and conversation storage.
 """
 
+import inspect
 import logging
 import re
 import traceback
@@ -63,6 +64,21 @@ if TYPE_CHECKING:
 
 
 _SQL_WHITESPACE_RE = re.compile(r"\s+")
+
+
+async def _emit_runtime_event(
+    request_context: RequestContext,
+    event_type: str,
+    data: Dict[str, Any] | None = None,
+) -> None:
+    """Emit an optional process-local trace event without coupling to storage."""
+
+    sink = (request_context.runtime or {}).get("event_sink")
+    if sink is None:
+        return
+    result = sink(event_type, dict(data or {}))
+    if inspect.isawaitable(result):
+        await result
 _METADATA_SQL_REFERENCE_RE = re.compile(
     r"(?i)(?:\binformation_schema\b|\bpg_catalog\b|\bpg_(?:class|attribute|constraint|namespace|index|indexes)\b|\bsys\.)"
 )
@@ -637,6 +653,11 @@ class Agent:
             ):
                 yield component
         except Exception as e:
+            await _emit_runtime_event(
+                request_context,
+                "agent.failed",
+                {"exception_type": type(e).__name__, "message": str(e)},
+            )
             # Log full stack trace
             stack_trace = traceback.format_exc()
             logger.error(
@@ -727,7 +748,9 @@ class Agent:
                 attributes={"has_context": request_context is not None},
             )
 
-        user = await self.user_resolver.resolve_user(request_context)
+        user = request_context.user or await self.user_resolver.resolve_user(
+            request_context
+        )
 
         if self.observability_provider and user_resolution_span:
             user_resolution_span.set_attribute("user_id", user.id)
@@ -778,6 +801,11 @@ class Agent:
                     )
 
                 if components:
+                    await _emit_runtime_event(
+                        request_context,
+                        "intent.classified",
+                        {"intent": "starter_ui"},
+                    )
                     # Yield the starter UI components
                     for component in components:
                         yield component
@@ -930,6 +958,11 @@ class Agent:
 
                 if workflow_result.should_skip_llm:
                     # Workflow handled the message, short-circuit LLM
+                    await _emit_runtime_event(
+                        request_context,
+                        "intent.classified",
+                        {"intent": "deterministic_workflow"},
+                    )
 
                     # Apply conversation mutation if provided
                     if workflow_result.conversation_mutation:
@@ -992,6 +1025,15 @@ class Agent:
             finally:
                 if self.observability_provider and trigger_span:
                     await self.observability_provider.end_span(trigger_span)
+
+        await _emit_runtime_event(
+            request_context,
+            "intent.classified",
+            {
+                "intent": "data_question",
+                "database_id": request_context.metadata.get("database_id"),
+            },
+        )
 
         # Persist new conversation to store before adding message
         if is_new_conversation:
@@ -1226,10 +1268,28 @@ class Agent:
             )
 
             # Get LLM response
+            await _emit_runtime_event(
+                request_context,
+                "model.started",
+                {
+                    "iteration": tool_iterations + 1,
+                    "visible_tool_count": len(visible_tool_schemas),
+                },
+            )
             if self.config.stream_responses:
                 response = await self._handle_streaming_response(request)
             else:
                 response = await self._send_llm_request(request)
+            await _emit_runtime_event(
+                request_context,
+                "model.completed",
+                {
+                    "iteration": tool_iterations + 1,
+                    "tool_call_count": len(response.tool_calls or []),
+                    "usage": dict(response.usage or {}),
+                    "model": getattr(self.llm_service, "model", "unknown"),
+                },
+            )
 
             if request.metadata:
                 request_metadata.update(request.metadata)
@@ -1287,6 +1347,15 @@ class Agent:
                 # Collect all tool results first
                 tool_results = []
                 for i, tool_call in enumerate(response.tool_calls or []):
+                    await _emit_runtime_event(
+                        request_context,
+                        "tool.started",
+                        {
+                            "tool_call_id": tool_call.id,
+                            "tool_name": tool_call.name,
+                            "arguments": dict(tool_call.arguments),
+                        },
+                    )
                     schema_query_fallback_used = _backfill_schema_retrieve_query(
                         tool_call,
                         message,
@@ -1441,6 +1510,18 @@ class Agent:
                             result.metadata["semantic_contract_validation"] = dict(
                                 semantic_contract_validation
                             )
+
+                    await _emit_runtime_event(
+                        request_context,
+                        "tool.completed",
+                        {
+                            "tool_call_id": tool_call.id,
+                            "tool_name": tool_call.name,
+                            "success": result.success,
+                            "error": result.error,
+                            "metadata": dict(result.metadata or {}),
+                        },
+                    )
 
                     if _is_rejected_metadata_sql(tool_call, result):
                         metadata_query_rejections += 1
@@ -1805,6 +1886,20 @@ You can:
                     disabled=False,
                 )
             )
+
+        successful_sql = any(
+            item.get("tool_name") == "run_sql" and item.get("success")
+            for item in all_tool_results
+        )
+        await _emit_runtime_event(
+            request_context,
+            "answer.generated",
+            {
+                "tool_iterations": tool_iterations,
+                "successful_sql": successful_sql,
+                "hit_tool_limit": tool_iterations >= self.config.max_tool_iterations,
+            },
+        )
 
         # Save conversation if configured
         if self.config.auto_save_conversations:

@@ -16,9 +16,10 @@ It reuses the upstream QueryMind Agent Loop, Schema Memory, SQL Governance, RLS,
 - Read-only PostgreSQL PK/FK extraction through `pg_catalog`, including composite and cross-schema relationships.
 - Persistent LLM-generated conversation titles, automatic history refresh, workflow message storage, and graceful fallback.
 - A 24-case Chinese AdventureWorks business benchmark with deterministic full-result checks, Schema Recall, first-attempt metrics, failure attribution, trace redaction, and an interactive HTML report.
-- Database-scoped Schema Memory retrieval plus an independent Chinook benchmark and 12-metric catalog for second-source admission; the v0.9 development set has reached 50/100 cases.
+- Database-scoped Schema Memory retrieval plus an independent Chinook benchmark and 12-metric catalog; v0.10 freezes 100 cases into 60/20/20 development/test/holdout splits.
 - A bounded Agent Run/Event lifecycle with idempotent creation, tenant/user-scoped reads, ordered event cursors, optimistic versions, cancellation, and an atomic single-process development store.
-- AdventureWorks validation across 68 tables and 456 fields, plus an initialized 11-table Chinook source; the current formal Python test scope is `229 passed, 1 warning`.
+- Deterministic Result Validation grounded in the accepted Query Plan and Semantic Contract; only a validated latest successful SQL result can emit `result.validated`, while missing, failed, or inconclusive evidence fails the Run closed.
+- AdventureWorks validation across 68 tables and 456 fields, plus an initialized 11-table Chinook source and 100/100 read-only reference-SQL validation.
 
 ### Current evidence and boundaries
 
@@ -27,8 +28,8 @@ It reuses the upstream QueryMind Agent Loop, Schema Memory, SQL Governance, RLS,
 | AdventureWorks delivery | PostgreSQL read-only workflow, 68 tables, 456 fields, Schema Memory initialized | Local development environment, not a production deployment |
 | Text2SQL evaluation | Frozen 24-case deterministic benchmark, S0-S5 comparisons, per-case SQL and failure attribution | Results apply only to recorded datasets, snapshots, models, and settings |
 | Multi-source support | AdventureWorks plus an independent 11-table Chinook admission path | A new source still requires schema initialization, semantic definitions, and its own benchmark |
-| Governed Agent runtime | Existing Chat Agent plus v0.10-A1 Run/Event state contract | The Run API currently creates queued state; background execution, live SSE, approval recovery, and multi-instance storage are not implemented yet |
-| Automated verification | `229 passed, 1 warning` | Python test suite; it is not a production availability or concurrency claim |
+| Governed Agent runtime | Existing Chat Agent plus v0.10 Run/Event executor | Background execution, live SSE, trace redaction, approval/clarification, feedback, and restart fail-closed are implemented; storage remains single-process |
+| Automated verification | Python, concurrency/fault, reference-SQL, and real-model evaluation | Evidence is local and does not claim production availability or multi-instance capacity |
 
 Accuracy is measured, not promised universally. QueryMind uses repeatable admission gates to establish an accuracy range for each data source and version instead of claiming that one benchmark guarantees future databases.
 
@@ -135,16 +136,17 @@ sequenceDiagram
         T->>M: Read/write memory, schema knowledge, and history
         T-->>A: Results, charts, and artifacts
         A-->>UI: Stream response chunks
-    else v0.10-A1 lifecycle path
+    else v0.10 governed Run path
         U->>API: POST /api/querymind/v1/agent-runs
         API->>R: Create an idempotent queued Run
-        U->>API: GET Run / Events or POST Cancel
-        API->>R: Scoped read or atomic transition
-        R-->>U: Redacted snapshot and ordered events
+        R->>A: Execute the existing governed Agent in background
+        A-->>R: Persist redacted trace and status
+        R-->>U: Stream ordered events over SSE
+        U->>API: Approve, clarify, give feedback, or cancel when needed
     end
 ```
 
-The two API paths are not yet connected: the Chat API executes the existing governed single Agent, while the v0.10-A1 Run API currently persists lifecycle state only. v0.10-A2 will adapt that same Agent to queued execution; it does not introduce an unproven multi-Agent architecture.
+The Chat API and Run API now share the existing governed single Agent. The Run API adds asynchronous lifecycle, replayable events, cancellation, trace, and HITL without introducing an unproven multi-Agent layer.
 
 ## Get Started
 
@@ -238,7 +240,7 @@ python my_agent.py
 python webcomponent_demo.py --api-base http://127.0.0.1:8000
 ```
 
-### v0.10-A1 Agent Run API
+### v0.10 Governed Agent Run API
 
 `my_agent.py` mounts a `FileSystemAgentRunStore`. By default, its redacted Run snapshots and ordered events are stored under the project data directory in `agent_runs`; set `QUERYMIND_AGENT_RUNS_DIR` to choose another local development path.
 
@@ -256,7 +258,7 @@ curl -X POST "http://127.0.0.1:8000/api/querymind/v1/agent-runs/${RUN_ID}/cancel
   -d '{"expected_version":1}'
 ```
 
-Creation requires an `Idempotency-Key`. Repeating the same request returns the existing Run; reusing the key for a different request returns `409`. Reads are scoped to the server-resolved tenant and user. This API does **not** execute the question yet, so a newly created Run remains `queued` until v0.10-A2 connects a worker.
+Creation requires an `Idempotency-Key`. Repeating the same request returns the existing Run; reusing the key for a different request returns `409`. Reads and decisions are scoped to the server-resolved tenant and user. A background executor runs the same Chat Agent, exposes resumable SSE events, supports cancellation, approvals, clarifications and feedback, and fails closed after an unknown interrupted execution state.
 
 ### Verification
 
@@ -264,7 +266,7 @@ Creation requires an `Idempotency-Key`. Repeating the same request returns the e
 .venv/bin/python -m pytest tests
 ```
 
-The maintained Python suite currently reports `229 passed, 1 warning`. Use the explicit `tests` path: `frontends/webcomponent/test_backend.py` is a manual component demo whose `test_*` generator names are otherwise collected by a repository-wide bare `pytest` command.
+The maintained Python suite currently reports `283 passed, 1 warning`. Use the explicit `tests` path: `frontends/webcomponent/test_backend.py` is a manual component demo whose `test_*` generator names are otherwise collected by a repository-wide bare `pytest` command.
 
 ### v0.2 Text2SQL Evaluation
 
@@ -359,15 +361,21 @@ These are small-sample AdventureWorks results, not a cross-database guarantee. N
 
 The v0.8 work first closes a source-isolation gap in Schema Memory: vector filters, Neo4j traversal, schema hydration, and RRF identities now carry the active database name. An explicit fail-closed migration method checks the legacy graph before replacing the old `schema + table` uniqueness constraint; it is not run automatically during startup.
 
-The second source is the official Chinook 1.4.5 PostgreSQL sample. The local snapshot contains 11 tables, 64 columns, 11 foreign keys, and 15,607 rows. A separate Chinook 1.0.0 semantic catalog defines 12 metrics, and a separate 24-case Chinese benchmark covers single-table aggregation, multi-hop joins, a bridge table, a self-join, HAVING, CTEs, subqueries, and windows. All 24 reference SQL statements execute in read-only transactions, return non-empty results, and satisfy their declared SQL contracts.
+The second source is the official Chinook 1.4.5 PostgreSQL sample. The local snapshot contains 11 tables, 64 columns, 11 foreign keys, and 15,607 rows. The current Chinook 1.0.1 semantic catalog defines 13 metrics; its original v0.8 admission baseline used 12 metrics in version 1.0.0. A separate 24-case Chinese benchmark covers single-table aggregation, multi-hop joins, a bridge table, a self-join, HAVING, CTEs, subqueries, and windows. All 24 reference SQL statements execute in read-only transactions, return non-empty results, and satisfy their declared SQL contracts.
 
 The explicit Neo4j migration and Chinook Schema Memory initialization are complete. After generic fixes for HAVING-plan alignment, CTE select-scope analysis, expression wrappers, numeric fingerprints, and an explicit date-granularity comparison policy, a fairness-checked 24-case r6 run found S0/S3/S5 business accuracy of 66.67%/70.83%/83.33%, wrong-but-executed rates of 33.33%/25.00%/12.50%, and P95 latency of 1.74/17.51/14.39 seconds. S5 passes the predefined 24-case development gates, but this remains a single-run development admission rather than a production accuracy guarantee. See [the v0.8 design and current evidence](docs/portfolio/v0.8-multi-source-admission.md).
 
-The v0.9 benchmark work is now in development: a machine-readable 100-case admission profile, coverage checker, reference-SQL-only validator, SQL feature-alternative contracts, and two reviewed expansion batches are implemented. The current set is 50/100; all 50 reference SQL statements execute read-only with non-empty results. No 50-case Agent accuracy is claimed yet. See [the v0.9 benchmark plan and status](docs/portfolio/v0.9-production-benchmark.md).
+The v0.9-v0.10 benchmark now contains 100 frozen Chinook cases with a machine-readable admission profile, 60/20/20 splits, a reference-SQL-only validator, process-trace coverage, and repeated-run quality gates. All 100 reference SQL statements execute read-only with non-empty results. Three comparable real-model runs averaged 67.67% business accuracy, 19.00% wrong-but-executed, and 81.00% per-case consistency, so the automated quality decision is `NOT READY`. This is a measured baseline, not a cross-database guarantee. See [the benchmark plan and status](docs/portfolio/v0.9-production-benchmark.md).
 
-The v0.10-A1 implementation now provides a bounded Run/Event lifecycle, an atomic single-process development store, mandatory idempotent creation, tenant/user-scoped reads, ordered event cursors, optimistic versions, and idempotent cancellation. The existing Chat Agent is not yet executed by a background Run worker, and live SSE, Step/Tool traces, approval recovery, and multi-instance storage remain pending. The project intentionally keeps the current governed single-Agent pattern instead of adding a multi-Agent layer without measured benefit. See [the product scope and KPIs](docs/portfolio/product-scope-and-kpis.md), [the v0.10 runtime design and status](docs/portfolio/v0.10-governed-agent-runtime.md), and [ADR-0001](docs/adr/0001-single-agent-governed-runtime.md).
+The v0.10 implementation provides a bounded Run/Event lifecycle, atomic single-process storage, background execution, resumable SSE, unified redacted traces, optimistic versions, cancellation, approval/rejection, clarification, feedback, and restart fail-closed semantics. Concurrency and fault-injection tests cover idempotent creation, decision races, cross-user access, and provider timeouts. It intentionally keeps the governed single-Agent pattern. Multi-instance transactional storage, task leases, and production authentication remain pending. See [the product scope and KPIs](docs/portfolio/product-scope-and-kpis.md), [the v0.10 runtime design and status](docs/portfolio/v0.10-governed-agent-runtime.md), and [ADR-0001](docs/adr/0001-single-agent-governed-runtime.md).
 
-The latest formal Python test scope is `229 passed, 1 warning`.
+The first post-baseline accuracy iteration adds schema-derived stable grain keys, contract-authorized entity counts, exact top-per-partition limits, unplanned-filter rejection, safe aggregate equivalence, actionable plan-repair hints, and last-successful-SQL evaluation evidence. Source-specific formulas remain in the Chinook and AdventureWorks catalogs instead of the generic Agent. Machine audits report zero errors or warnings across the revised 100-case Chinook and 24-case AdventureWorks contracts; their reference SQL passes 100/100 and 24/24 read-only validation. On the final v0.10.1 snapshot, Chinook S0/S3/S5 business accuracy was 65%/80%/76% in a fair single-run comparison; three S5 repeats averaged 79.00% business accuracy, 10.33% wrong-but-executed, and 83.00% consistency, so its production-candidate decision remains `NOT READY`. AdventureWorks S0/S3/S5 reached 45.83%/70.83%/87.50%; three S5 repeats averaged 86.11% business accuracy and 6.94% wrong-but-executed, passing the predefined 24-case cross-source regression gates. That `READY` status is not a claim of production readiness or accuracy on arbitrary databases.
+
+The latest retained v0.10.2 quality snapshot adds joined-count DISTINCT preservation and removes a false Plan-to-SQL block for single-table `COUNT(*)` support columns. Three comparable Chinook S5 runs reached 84.67% mean business accuracy and 9.00% wrong-but-executed, but 31.74-second maximum P95 latency and 83.00% consistency still fail the profile, so the result remains `NOT READY`. A subsequent plan-aggregation experiment passed its targeted case 3/3 but regressed the full benchmark and was reverted; its negative reports are retained. See [the v0.10.2 evidence record](docs/portfolio/v0.10.2-quality-count-star-and-plan-negative-result.md).
+
+P0-C adds deterministic Result Validation and corrects the Run/Event meaning of `result.validated`. Three comparable final-candidate runs reached 84%/82%/84% business accuracy and 9%/12%/8% wrong-but-executed, for 83.33% and 9.67% means. Business accuracy and wrong-executed gates passed; 76.01-second maximum P95 latency and 84% consistency did not, so admission remains `NOT READY`. A separate provider-error run was isolated and is not included. See [the P0-C evidence record](docs/portfolio/v0.10.2-result-validation-runtime.md).
+
+The latest formal Python test scope is `283 passed, 1 warning`.
 
 ### Web Component
 
@@ -392,14 +400,14 @@ The handbook expands the README into components, advanced-features, use-case, an
 
 ### Ongoing
 
-1. Complete v0.10-A2 by adapting the existing single Agent to queued Run execution, live SSE continuation, restart recovery, and concurrent cancellation; then add Step/Tool trace and redaction without changing SQL generation policy.
+1. Prioritize the 24 consistently wrong and 19 unstable cases from the three formal runs, especially window, comparison, employee analytics, JOIN grain, and evaluator-contract issues; revalidate every change against the frozen holdout.
 
 <figure>
   <img src="docs/figures/use-cases/eval-driven%20iterations.png" alt="Eval-driven iterations" />
   <figcaption>Eval-driven iterations: use benchmark feedback to refine prompts, governance, and SQL recovery behavior.</figcaption>
 </figure>
 
-2. Keep the Chinook benchmark paused at 50/100 while the runtime event contract changes. Resume the [v0.9 plan](docs/portfolio/v0.9-production-benchmark.md), freeze a 60/20/20 development/test/holdout split, and run repeated real-model evaluation only after the v0.10 interfaces stabilize.
+2. Use the 100-case failure distribution to choose the next generic retrieval, semantic-contract, or result-validation improvement; do not add case-ID-specific runtime rules.
 
 
 ### Future Actions

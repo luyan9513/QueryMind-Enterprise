@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from QueryMind.core.agent_run import AgentRunStatus
 from QueryMind.core.user import User
 from QueryMind.integrations.local import MemoryAgentRunStore
 from QueryMind.server.fastapi import QueryMindFastAPIServer
@@ -143,3 +146,45 @@ def test_fastapi_server_factory_registers_agent_run_routes() -> None:
 
     assert response.status_code == 201
     assert response.json()["run"]["status"] == "queued"
+
+
+def test_human_decision_and_feedback_routes_hide_cross_user_runs() -> None:
+    store = MemoryAgentRunStore()
+    client = _build_client(store)
+    created = client.post(
+        "/api/querymind/v1/agent-runs",
+        json={"question": "统计收入", "database_id": "chinook"},
+        headers={"Idempotency-Key": "scoped-hitl-1"},
+    )
+    run_id = created.json()["run"]["id"]
+
+    asyncio.run(
+        store.transition_run(
+            run_id,
+            AgentRunStatus.RUNNING,
+            tenant_id="tenant-a",
+            user_id="user-a",
+        )
+    )
+    waiting = asyncio.run(
+        store.transition_run(
+            run_id,
+            AgentRunStatus.WAITING_FOR_APPROVAL,
+            tenant_id="tenant-a",
+            user_id="user-a",
+        )
+    )
+
+    hidden_approval = client.post(
+        f"/api/querymind/v1/agent-runs/{run_id}/approvals",
+        json={"decision": "approve", "expected_version": waiting.version},
+        headers={"x-user-id": "user-b"},
+    )
+    hidden_feedback = client.post(
+        f"/api/querymind/v1/agent-runs/{run_id}/feedback",
+        json={"rating": "incorrect"},
+        headers={"x-user-id": "user-b"},
+    )
+
+    assert hidden_approval.status_code == 404
+    assert hidden_feedback.status_code == 404

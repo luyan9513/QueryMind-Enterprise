@@ -9,6 +9,8 @@ from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field
 
+from .models import User
+
 
 class RequestContext(BaseModel):
     """Context from a web request for user resolution.
@@ -38,6 +40,18 @@ class RequestContext(BaseModel):
 
     metadata: Dict[str, Any] = Field(
         default_factory=dict, description="Additional framework-specific metadata"
+    )
+
+    user: Optional[User] = Field(
+        default=None,
+        description="Server-resolved identity for background execution",
+        exclude=True,
+    )
+
+    runtime: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Process-local callbacks that must never be serialized",
+        exclude=True,
     )
 
     def get_cookie(self, name: str, default: Optional[str] = None) -> Optional[str]:

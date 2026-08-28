@@ -16,9 +16,32 @@ _IDENTIFIER_QUOTE_RE = re.compile(r"[`\"\[\]]")
 _COUNT_DISTINCT_RE = re.compile(
     r"(?i)\bcount\s*\(\s*distinct\s+([a-z_][a-z0-9_.$`\"\[\]]*)"
 )
+_COUNT_COLUMN_RE = re.compile(
+    r"(?i)\bcount\s*\(\s*(?!distinct\b)([a-z_][a-z0-9_.$`\"\[\]]*)"
+)
 _EXPLICIT_DISTINCT_REQUEST_RE = re.compile(
     r"(?i)(?:\bdistinct\b|\bunique\b|去重|唯一)"
 )
+_TOP_PER_GROUP_CUE_RE = re.compile(
+    r"(?is)(?:每个|每位|各个|各\s*|\beach\b|\bper\b).{0,80}"
+    r"(?:最高|最多|最低|最少|\btop\b|\bbottom\b|\bhighest\b|\blowest\b)"
+)
+_TOP_LIMIT_RE = re.compile(
+    r"(?is)(?:最高|最多|最低|最少)(?:的)?\s*([一二三四五六七八九十]|\d+)"
+    r"|\b(?:top|bottom)\s+(\d+)\b"
+)
+_CHINESE_NUMBERS = {
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+}
 
 
 class QueryPlanMode(StrEnum):
@@ -89,6 +112,13 @@ class QueryPlan(BaseModel):
     )
     metric_expressions: List[str] = Field(default_factory=list)
     dimensions: List[str] = Field(default_factory=list)
+    grain_keys: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Qualified stable keys that uniquely identify one result row. "
+            "Grouping keys may be omitted from user-facing output."
+        ),
+    )
     filters: List[QueryPlanFilter] = Field(default_factory=list)
     row_grain: str = Field(
         min_length=1,
@@ -102,6 +132,14 @@ class QueryPlan(BaseModel):
     requires_aggregation: bool = False
     requires_grouping: bool = False
     requires_ordering: bool = False
+    partition_limit: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Exact number of rows retained inside each partition for a "
+            "top/bottom-per-group request; otherwise null."
+        ),
+    )
     limit: Optional[int] = Field(default=None, gt=0)
     business_definition_notes: List[str] = Field(default_factory=list)
     semantic_contract_ids: List[str] = Field(
@@ -167,6 +205,32 @@ def _dedupe(values: List[str]) -> List[str]:
     return result
 
 
+def _requested_partition_limit(raw_user_message: Optional[str]) -> Optional[int]:
+    text = str(raw_user_message or "").strip()
+    if not text or not _TOP_PER_GROUP_CUE_RE.search(text):
+        return None
+    match = _TOP_LIMIT_RE.search(text)
+    if not match:
+        return 1
+    raw_limit = next((item for item in match.groups() if item), "")
+    if raw_limit.isdigit():
+        return int(raw_limit)
+    return _CHINESE_NUMBERS.get(raw_limit, 1)
+
+
+def _row_grain_subject(value: Any) -> str:
+    text = str(value or "").casefold()
+    match = re.search(r"\b(?:one\s+)?row\s+per\s+(.+)", text)
+    if match:
+        text = match.group(1)
+    text = re.split(
+        r"[,;，；]|\b(?:who|whose|with|showing|that|where)\b",
+        text,
+        maxsplit=1,
+    )[0]
+    return re.sub(r"[^a-z0-9]+", "", text)
+
+
 def _canonical_predicate_expression(
     value: Any,
     dialect: Optional[str],
@@ -184,6 +248,96 @@ def _canonical_predicate_expression(
         else node
     )
     return normalized.sql(dialect=str(dialect or "").strip() or None).casefold()
+
+
+def _distinct_count_columns(
+    sql: str,
+    dialect: Optional[str],
+) -> List[str]:
+    """Return DISTINCT-counted columns with physical table aliases resolved."""
+
+    try:
+        statement = parse_one(sql, read=str(dialect or "").strip() or None)
+    except Exception:
+        return []
+
+    table_aliases: Dict[str, str] = {}
+    for table in statement.find_all(exp.Table):
+        table_parts = [
+            str(getattr(table, part, "") or "").strip()
+            for part in ("catalog", "db", "name")
+        ]
+        physical_table = ".".join(part for part in table_parts if part)
+        if not physical_table:
+            continue
+        for alias in (table.alias_or_name, table.name):
+            normalized_alias = str(alias or "").strip().lower()
+            if normalized_alias:
+                table_aliases[normalized_alias] = physical_table
+
+    columns: List[str] = []
+    for count in statement.find_all(exp.Count):
+        if not isinstance(count.this, exp.Distinct):
+            continue
+        for column in count.this.find_all(exp.Column):
+            column_name = str(column.name or "").strip()
+            if not column_name:
+                continue
+            qualifier = str(column.table or "").strip()
+            resolved_table = table_aliases.get(qualifier.lower(), qualifier)
+            columns.append(
+                f"{qualifier}.{column_name}" if qualifier else column_name
+            )
+            if resolved_table and resolved_table.casefold() != qualifier.casefold():
+                columns.append(f"{resolved_table}.{column_name}")
+    return _dedupe(columns)
+
+
+def _expression_columns(expressions: List[str], dialect: Optional[str]) -> List[str]:
+    columns: List[str] = []
+    read_dialect = str(dialect or "").strip() or None
+    for expression in expressions:
+        try:
+            statement = parse_one(f"SELECT {expression}", read=read_dialect)
+        except Exception:
+            continue
+        columns.extend(
+            str(column.name or "").strip()
+            for column in statement.find_all(exp.Column)
+            if str(column.name or "").strip()
+        )
+    return _dedupe(columns)
+
+
+def _count_star_covers_support_column(
+    plan: QueryPlan,
+    column: str,
+    dialect: Optional[str],
+) -> bool:
+    """Allow non-operative evidence columns behind a single-table COUNT(*)."""
+
+    if (
+        len(plan.source_tables) != 1
+        or plan.join_path
+        or not plan.requires_aggregation
+        or not any(
+            re.search(r"(?i)\bcount\s*\(\s*\*\s*\)", expression)
+            for expression in plan.metric_expressions
+        )
+    ):
+        return False
+
+    operative_columns = [
+        *plan.dimensions,
+        *plan.grain_keys,
+        *plan.output_columns,
+        *(query_filter.column for query_filter in plan.filters),
+        *_expression_columns(plan.metric_expressions, dialect),
+    ]
+    return not any(
+        _identifier_matches(column, operative_column)
+        for operative_column in operative_columns
+    )
 
 
 def build_schema_evidence(
@@ -289,6 +443,36 @@ def validate_query_plan_intent(
     primary_keys = evidence.get("table_primary_keys")
     primary_keys = dict(primary_keys) if isinstance(primary_keys, dict) else {}
 
+    if plan.requires_grouping and len(plan.grain_keys) > 1:
+        normalized_row_grain = _row_grain_subject(plan.row_grain)
+        for table_name, field_names in primary_keys.items():
+            table_parts = _identifier_parts(table_name)
+            entity_name = re.sub(
+                r"[^a-z0-9]+",
+                "",
+                table_parts[-1] if table_parts else "",
+            )
+            for primary_key in field_names or []:
+                qualified_key = f"{table_name}.{primary_key}"
+                if not any(
+                    _identifier_matches(qualified_key, grain_key)
+                    for grain_key in plan.grain_keys
+                ):
+                    continue
+                represented = any(
+                    _identifier_matches(qualified_key, dimension)
+                    for dimension in plan.dimensions
+                ) or any(
+                    _identifier_matches(primary_key, output)
+                    for output in plan.output_columns
+                )
+                if entity_name and entity_name in normalized_row_grain:
+                    represented = True
+                if not represented:
+                    issues.append(
+                        f"grain_key_conflicts_with_row_grain:{qualified_key}"
+                    )
+
     if (
         len(plan.source_tables) == 1
         and not plan.join_path
@@ -313,6 +497,74 @@ def validate_query_plan_intent(
                     f"unrequested_distinct_primary_key_count:{counted_column}"
                 )
 
+    if plan.requires_grouping:
+        normalized_grain = _row_grain_subject(plan.row_grain)
+        for table_name, field_names in primary_keys.items():
+            if not any(
+                _identifier_matches(table_name, source_table)
+                for source_table in plan.source_tables
+            ):
+                continue
+            table_parts = _identifier_parts(table_name)
+            entity_name = re.sub(
+                r"[^a-z0-9]+",
+                "",
+                table_parts[-1] if table_parts else "",
+            )
+            if not entity_name or entity_name not in normalized_grain:
+                continue
+            for primary_key in field_names or []:
+                qualified_key = f"{table_name}.{primary_key}"
+                if not any(
+                    _identifier_matches(qualified_key, grain_key)
+                    for grain_key in plan.grain_keys
+                ):
+                    issues.append(
+                        "grouped_entity_primary_key_missing_from_grain_keys:"
+                        f"{qualified_key}"
+                    )
+                if not any(
+                    _identifier_matches(qualified_key, column)
+                    for column in plan.required_columns
+                ):
+                    issues.append(
+                        "grouped_entity_primary_key_missing_from_required_columns:"
+                        f"{qualified_key}"
+                    )
+
+    if len(plan.source_tables) > 1 and plan.join_path:
+        known_primary_keys = [
+            str(primary_key)
+            for table_name, field_names in primary_keys.items()
+            if any(
+                _identifier_matches(table_name, source_table)
+                for source_table in plan.source_tables
+            )
+            for primary_key in field_names or []
+        ]
+        for expression in plan.metric_expressions:
+            for match in _COUNT_COLUMN_RE.finditer(str(expression)):
+                counted_column = match.group(1)
+                if any(
+                    _identifier_matches(counted_column, primary_key)
+                    for primary_key in known_primary_keys
+                ):
+                    issues.append(
+                        "joined_primary_key_count_requires_distinct:"
+                        f"{counted_column}"
+                    )
+
+    requested_partition_limit = _requested_partition_limit(raw_user_message)
+    if (
+        requested_partition_limit is not None
+        and plan.partition_limit != requested_partition_limit
+    ):
+        issues.append(
+            "top_per_group_limit_mismatch:"
+            f"expected={requested_partition_limit}:"
+            f"planned={plan.partition_limit if plan.partition_limit is not None else 'none'}"
+        )
+
     return QueryPlanCheck(
         issues=_dedupe(issues),
         evidence={"intent_request_available": bool(request_text.strip())},
@@ -329,6 +581,8 @@ def _parse_sql_details(sql: str, dialect: Optional[str]) -> Dict[str, Any]:
             "columns": [],
             "where_columns": [],
             "filter_expressions": [],
+            "group_columns": [],
+            "group_expressions": [],
         }
 
     cte_aliases = {
@@ -369,11 +623,26 @@ def _parse_sql_details(sql: str, dialect: Optional[str]) -> Dict[str, Any]:
             if isinstance(node, (exp.Column, exp.AggFunc))
         )
 
+    group_columns: List[str] = []
+    group_expressions: List[str] = []
+    for group in statement.find_all(exp.Group):
+        group_columns.extend(
+            str(column.name or "").strip()
+            for column in group.find_all(exp.Column)
+            if str(column.name or "").strip()
+        )
+        group_expressions.extend(
+            _canonical_predicate_expression(expression, dialect)
+            for expression in group.expressions
+        )
+
     return {
         "tables": _dedupe(tables),
         "columns": _dedupe(columns),
         "where_columns": _dedupe(where_columns),
         "filter_expressions": _dedupe(filter_expressions),
+        "group_columns": _dedupe(group_columns),
+        "group_expressions": _dedupe(group_expressions),
     }
 
 
@@ -457,7 +726,18 @@ def validate_sql_against_query_plan(
     actual_tables = details["tables"] or list(shape.table_references)
     actual_columns = details["columns"]
     where_columns = details["where_columns"]
+    group_columns = details["group_columns"]
+    group_expressions = set(details["group_expressions"])
     filter_expressions = set(details["filter_expressions"])
+    planned_distinct_counts = _dedupe(
+        column
+        for expression in plan.metric_expressions
+        for column in _distinct_count_columns(
+            f"SELECT {expression}",
+            dialect,
+        )
+    )
+    actual_distinct_counts = _distinct_count_columns(sql, dialect)
     issues: List[str] = []
 
     for table in plan.source_tables:
@@ -472,11 +752,43 @@ def validate_sql_against_query_plan(
     }
     for column in plan.required_columns:
         column_parts = _identifier_parts(column)
-        if column_parts and column_parts[-1] not in actual_column_names:
+        if (
+            column_parts
+            and column_parts[-1] not in actual_column_names
+            and not _count_star_covers_support_column(plan, column, dialect)
+        ):
             issues.append(f"planned_column_missing_from_sql:{column}")
 
     where_column_names = {
         parts[-1] for value in where_columns if (parts := _identifier_parts(value))
+    }
+    planned_filter_column_names: set[str] = set()
+    for query_filter in plan.filters:
+        filter_text = str(query_filter.column or "").strip()
+        try:
+            filter_node = parse_one(
+                filter_text,
+                read=str(dialect or "").strip() or None,
+            )
+        except Exception:
+            filter_node = None
+        if filter_node is not None:
+            planned_filter_column_names.update(
+                str(column.name or "").strip().lower()
+                for column in filter_node.find_all(exp.Column)
+                if str(column.name or "").strip()
+            )
+        elif parts := _identifier_parts(filter_text):
+            planned_filter_column_names.add(parts[-1])
+        value_description = str(query_filter.value_description or "").casefold()
+        for required_column in plan.required_columns:
+            required_parts = _identifier_parts(required_column)
+            if required_parts and required_parts[-1] in value_description:
+                planned_filter_column_names.add(required_parts[-1])
+    required_column_names = {
+        parts[-1]
+        for column in plan.required_columns
+        if (parts := _identifier_parts(column))
     }
     for query_filter in plan.filters:
         planned_expression = _canonical_predicate_expression(
@@ -488,6 +800,12 @@ def validate_sql_against_query_plan(
         column_parts = _identifier_parts(query_filter.column)
         if column_parts and column_parts[-1] not in where_column_names:
             issues.append(f"planned_filter_missing_from_sql:{query_filter.column}")
+    for column_name in sorted(where_column_names):
+        if (
+            column_name in required_column_names
+            and column_name not in planned_filter_column_names
+        ):
+            issues.append(f"unplanned_filter_column_in_sql:{column_name}")
 
     projection_count = len(shape.select_items)
     if projection_count != len(plan.output_columns):
@@ -497,12 +815,39 @@ def validate_sql_against_query_plan(
         )
     if plan.requires_aggregation and not shape.has_aggregation:
         issues.append("planned_aggregation_missing_from_sql")
+    for counted_column in planned_distinct_counts:
+        if not any(
+            _identifier_matches(counted_column, actual_column)
+            for actual_column in actual_distinct_counts
+        ):
+            issues.append(
+                f"planned_distinct_count_missing_from_sql:{counted_column}"
+            )
     if plan.requires_grouping and not shape.has_group_by:
         issues.append("planned_grouping_missing_from_sql")
+    if plan.requires_grouping and shape.has_group_by:
+        for grain_key in plan.grain_keys:
+            canonical_grain_key = _canonical_predicate_expression(
+                grain_key,
+                dialect,
+            )
+            identifier_match = any(
+                _identifier_matches(grain_key, group_column)
+                for group_column in group_columns
+            )
+            if not identifier_match and canonical_grain_key not in group_expressions:
+                issues.append(f"planned_grain_key_missing_from_group_by:{grain_key}")
     if plan.requires_ordering and not shape.has_order_by:
         issues.append("planned_ordering_missing_from_sql")
     if plan.limit is not None and not shape.has_limit:
         issues.append("planned_limit_missing_from_sql")
+    if plan.partition_limit is not None:
+        if not shape.has_window_function:
+            issues.append("planned_partition_limit_window_missing_from_sql")
+        if not shape.has_where:
+            issues.append("planned_partition_limit_filter_missing_from_sql")
+        if not re.search(r"(?i)\brow_number\s*\(", sql):
+            issues.append("planned_partition_limit_requires_row_number")
 
     return QueryPlanCheck(
         issues=_dedupe(issues),
@@ -511,5 +856,11 @@ def validate_sql_against_query_plan(
             "sql_tables": actual_tables,
             "planned_output_count": len(plan.output_columns),
             "sql_projection_count": projection_count,
+            "planned_grain_keys": list(plan.grain_keys),
+            "sql_group_columns": group_columns,
+            "sql_group_expressions": sorted(group_expressions),
+            "planned_partition_limit": plan.partition_limit,
+            "planned_distinct_count_columns": planned_distinct_counts,
+            "sql_distinct_count_columns": actual_distinct_counts,
         },
     )

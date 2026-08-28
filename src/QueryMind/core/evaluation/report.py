@@ -44,6 +44,7 @@ def _plain_contract_violation(value: str) -> str:
     labels = {
         "sql_parse_error": "SQL 无法解析",
         "missing_feature": f"缺少必要 SQL 结构：{detail}",
+        "missing_feature_group": f"缺少任一可接受 SQL 结构：{detail}",
         "forbidden_feature": f"出现不允许的 SQL 结构：{detail}",
         "missing_column": f"缺少必要字段：{detail}",
         "forbidden_column": f"使用了不允许的字段：{detail}",
@@ -722,6 +723,7 @@ class EvaluationReport(BaseModel):
                     "business_result_correct",
                     "sql_contract_passed",
                     "sql_contract_violations",
+                    "sql_contract_advisories",
                     "first_sql_execution_success",
                     "first_sql_result_correct",
                     "tool_call_count",
@@ -754,6 +756,7 @@ class EvaluationReport(BaseModel):
                         result.metadata.get("business_result_correct", ""),
                         result.metadata.get("sql_contract_passed", ""),
                         ",".join(result.metadata.get("sql_contract_violations", [])),
+                        ",".join(result.metadata.get("sql_contract_advisories", [])),
                         result.metadata.get("first_sql_execution_success", ""),
                         result.metadata.get("first_sql_result_correct", ""),
                         result.metadata.get("tool_call_count", ""),
@@ -884,6 +887,10 @@ class EvaluationReport(BaseModel):
             f"{answer_precision:.2%}" if answer_precision is not None else "没有自动执行"
         )
         contract_metrics = self.semantic_contract_metrics()
+        advisory_case_count = sum(
+            bool(result.metadata.get("sql_contract_advisories"))
+            for result in self.results
+        )
         lines = [
             f"# 系统评测明细：{self.dataset_name}",
             "",
@@ -898,6 +905,7 @@ class EvaluationReport(BaseModel):
             f"- 严格结果准确率：{self.result_correct_rate():.2%}",
             f"- 业务等价准确率：{self.business_result_correct_rate():.2%}",
             f"- SQL 契约通过率：{self.sql_contract_pass_rate():.2%}",
+            f"- SQL 实现形态 advisory 题数：{advisory_case_count}",
             f"- 评测器事后 SQL 可执行率：{self.execution_success_rate():.2%}",
             f"- Agent 内部 SQL 执行成功率：{self.agent_sql_execution_success_rate():.2%}",
             f"- 首条 SQL 严格正确率：{self.first_sql_result_correct_rate():.2%}",
@@ -922,6 +930,7 @@ class EvaluationReport(BaseModel):
             "- 严格结果准确率：完整结果值、行数、列数和题目契约同时通过，最保守。",
             "- 业务等价准确率：允许评测题显式声明的小数精度、同义值和顺序差异，但仍必须通过 SQL 契约。",
             "- SQL 契约：检查必要聚合、分组、过滤字段、输出列等结构，防止错误 SQL 被宽松 Judge 误判为正确。",
+            "- SQL 实现形态 advisory：记录 CTE、子查询等期望写法缺失，但不把业务等价结果直接判错；字段、过滤、输出和禁止项仍是硬约束。",
             "- 评测器事后 SQL 可执行率：评测器单独执行 Agent 最后尝试的 SQL；不代表 Agent 运行时放行并执行。",
             "- Agent 内部 SQL 执行成功率：至少一次 `run_sql` 真正通过计划、治理和权限检查并执行成功。",
             "- 已自动回答业务准确率：只在真正执行的题中统计正确率，必须和覆盖率一起看，不能靠大量拒答单独美化。",
@@ -970,6 +979,10 @@ class EvaluationReport(BaseModel):
                 else result.agent_result.get_primary_sql() or "-- 未生成 SQL"
             )
             problems = _case_problem_summary(result)
+            advisories = [
+                _plain_contract_violation(str(item))
+                for item in metadata.get("sql_contract_advisories", [])
+            ]
             reason = redact_sensitive_text(result.reason or "无额外说明")
             schema_recall = metadata.get("schema_recall")
             schema_label = (
@@ -984,6 +997,8 @@ class EvaluationReport(BaseModel):
                     f"- Schema Recall：{schema_label}",
                     f"- 工具调用 / Agent 延迟：{metadata.get('tool_call_count', len(result.agent_result.tool_calls))} 次 / {result.agent_result.execution_time_ms / 1000:.2f}s",
                     f"- 主要失败类型：{failure}",
+                    "- SQL 实现形态提示："
+                    + ("；".join(advisories) if advisories else "无"),
                     "",
                     "参考 SQL：",
                     "",
@@ -1414,6 +1429,7 @@ class ComparisonReport(BaseModel):
         baseline_snapshot = baseline._config_snapshot()
         controlled_fields = [
             "dataset_hash",
+            "code_snapshot_id",
             "database_id",
             "database_snapshot_id",
             "dialect",
@@ -1435,6 +1451,7 @@ class ComparisonReport(BaseModel):
         ]
         required_fields = [
             "dataset_hash",
+            "code_snapshot_id",
             "database_snapshot_id",
             "schema_snapshot_id",
             "agent_model",

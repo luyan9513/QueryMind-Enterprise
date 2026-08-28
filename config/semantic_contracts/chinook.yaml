@@ -1,5 +1,5 @@
 data_source_id: chinook
-version: "1.0.0"
+version: "1.0.1"
 description: Chinook 独立业务口径目录，用于验证通用语义合同引擎的跨数据源迁移能力。
 
 metrics:
@@ -81,14 +81,14 @@ metrics:
     owner: chinook-customer
     source_tables: [public.customer]
     required_columns: []
-    accepted_expressions: [COUNT(*), COUNT(customer_id)]
+    accepted_expressions: [COUNT(*), COUNT(customer_id), COUNT(DISTINCT customer_id)]
     output_alias: customer_count
     accepted_output_aliases: [客户数量, 客户数]
     base_grain: one customer
 
   - id: customer.active_customer_count
     name: 下单客户数
-    aliases: [不同客户下单, 活跃客户数]
+    aliases: [不同客户下单, 活跃客户数, 不同客户数]
     description: 按账单中的 CustomerID 去重计数。
     status: approved
     owner: chinook-customer
@@ -99,6 +99,25 @@ metrics:
     accepted_output_aliases: [活跃客户数, 下单客户数]
     base_grain: one distinct customer
     default_time_column: public.invoice.invoice_date
+    notes:
+      - 销售支持员工由 customer.support_rep_id 到 employee.employee_id 的关系定义；不要额外猜测或枚举 employee.title。
+
+  - id: catalog.playlist_distinct_track_count
+    name: 播放列表不同曲目数
+    aliases: [每个播放列表包含多少首不同曲目, 播放列表包含多少首不同曲目, 播放列表曲目数]
+    description: 播放列表曲目数按 PlaylistTrack.TrackID 去重；要求每个播放列表时必须保留空播放列表。
+    status: approved
+    owner: chinook-catalog
+    source_tables: [public.playlist_track]
+    required_columns:
+      - public.playlist_track.playlist_id
+      - public.playlist_track.track_id
+    accepted_expressions: [COUNT(DISTINCT track_id)]
+    output_alias: track_count
+    accepted_output_aliases: [曲目数, 不同曲目数]
+    base_grain: one distinct track per playlist
+    notes:
+      - 从 public.playlist 出发 LEFT JOIN public.playlist_track，并用 COUNT(DISTINCT playlist_track.track_id) 让空播放列表显示为 0。
 
   - id: catalog.track_count
     name: 曲目数

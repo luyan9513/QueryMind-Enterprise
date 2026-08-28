@@ -73,6 +73,7 @@ def _sales_plan(**overrides) -> QueryPlan:
         ],
         "metric_expressions": ["SUM(salesorderheader.totaldue)"],
         "dimensions": ["salesterritory.name"],
+        "grain_keys": ["sales.salesterritory.territoryid"],
         "filters": [],
         "row_grain": "one row per sales territory",
         "output_columns": ["territory_name", "total_sales"],
@@ -279,6 +280,391 @@ def test_query_plan_rejects_unrequested_distinct_count_of_single_table_pk() -> N
     assert explicit.passed is True
 
 
+def test_query_plan_requires_stable_primary_key_for_grouped_entity_grain() -> None:
+    metadata = {
+        "schema_evidence": {
+            "table_primary_keys": {
+                "chinook.public.track": ["track_id"],
+                "chinook.public.invoice_line": ["invoice_line_id"],
+            }
+        }
+    }
+    unsafe = QueryPlan(
+        objective="Top tracks by quantity sold",
+        source_tables=["public.track", "public.invoice_line"],
+        required_columns=[
+            "public.track.track_id",
+            "public.track.name",
+            "public.invoice_line.track_id",
+            "public.invoice_line.quantity",
+        ],
+        metric_expressions=["SUM(invoice_line.quantity)"],
+        dimensions=["track.name"],
+        row_grain="one row per track",
+        output_columns=["track_name", "quantity_sold"],
+        join_path=["invoice_line.track_id = track.track_id"],
+        requires_aggregation=True,
+        requires_grouping=True,
+    )
+
+    rejected = validate_query_plan_intent(unsafe, metadata, "Top tracks")
+    accepted = validate_query_plan_intent(
+        unsafe.model_copy(
+            update={"grain_keys": ["public.track.track_id"]}
+        ),
+        metadata,
+        "Top tracks",
+    )
+
+    assert rejected.issues == [
+        "grouped_entity_primary_key_missing_from_grain_keys:"
+        "chinook.public.track.track_id"
+    ]
+    assert accepted.passed is True
+
+
+def test_query_plan_requires_distinct_for_joined_entity_primary_key_count() -> None:
+    metadata = {
+        "schema_evidence": {
+            "table_primary_keys": {
+                "chinook.public.track": ["track_id"],
+                "chinook.public.invoice_line": ["invoice_line_id"],
+            }
+        }
+    }
+    unsafe = QueryPlan(
+        objective="Count catalog and sold tracks by media type",
+        source_tables=["public.track", "public.invoice_line"],
+        required_columns=[
+            "public.track.track_id",
+            "public.invoice_line.track_id",
+        ],
+        metric_expressions=["COUNT(track.track_id) AS catalog_track_count"],
+        dimensions=["track.media_type_id"],
+        row_grain="one row per media type",
+        output_columns=["media_type_id", "catalog_track_count"],
+        join_path=["invoice_line.track_id = track.track_id"],
+        requires_aggregation=True,
+        requires_grouping=True,
+    )
+
+    rejected = validate_query_plan_intent(unsafe, metadata, "Count tracks")
+    accepted = validate_query_plan_intent(
+        unsafe.model_copy(
+            update={
+                "metric_expressions": [
+                    "COUNT(DISTINCT track.track_id) AS catalog_track_count"
+                ]
+            }
+        ),
+        metadata,
+        "Count tracks",
+    )
+
+    assert rejected.issues == [
+        "joined_primary_key_count_requires_distinct:track.track_id"
+    ]
+    assert accepted.passed is True
+
+
+def test_semantic_contract_does_not_waive_joined_primary_key_distinct_safety() -> None:
+    metadata = {
+        "schema_evidence": {
+            "table_primary_keys": {
+                "public.invoice": ["invoice_id"],
+                "public.customer": ["customer_id"],
+            }
+        },
+        "semantic_contracts": {
+            "metrics": [
+                {
+                    "id": "sales.invoice_count",
+                    "accepted_expressions": ["COUNT(invoice_id)"],
+                }
+            ]
+        },
+    }
+    plan = QueryPlan(
+        objective="Count invoices per customer",
+        source_tables=["public.customer", "public.invoice"],
+        required_columns=["public.customer.customer_id", "public.invoice.invoice_id"],
+        metric_expressions=["COUNT(invoice.invoice_id) AS invoice_count"],
+        dimensions=["public.customer.customer_id"],
+        grain_keys=["public.customer.customer_id"],
+        row_grain="one row per customer",
+        output_columns=["customer_id", "invoice_count"],
+        join_path=["customer.customer_id = invoice.customer_id"],
+        requires_aggregation=True,
+        requires_grouping=True,
+        semantic_contract_ids=["sales.invoice_count"],
+    )
+
+    check = validate_query_plan_intent(plan, metadata, "Count invoices")
+
+    assert check.issues == [
+        "joined_primary_key_count_requires_distinct:invoice.invoice_id"
+    ]
+
+
+def test_query_plan_rejects_detail_primary_key_from_final_grain() -> None:
+    metadata = {
+        "schema_evidence": {
+            "table_primary_keys": {"public.track": ["track_id"]}
+        }
+    }
+    plan = QueryPlan(
+        objective="Count tracks by composer",
+        source_tables=["public.track"],
+        required_columns=["public.track.composer", "public.track.track_id"],
+        metric_expressions=["COUNT(track_id)"],
+        dimensions=["public.track.composer"],
+        grain_keys=["public.track.composer", "public.track.track_id"],
+        row_grain="one row per composer",
+        output_columns=["composer", "track_count"],
+        requires_aggregation=True,
+        requires_grouping=True,
+    )
+
+    check = validate_query_plan_intent(plan, metadata, "Count tracks by composer")
+
+    assert check.issues == [
+        "grain_key_conflicts_with_row_grain:public.track.track_id"
+    ]
+
+
+def test_query_plan_requires_partition_limit_for_top_per_group_request() -> None:
+    plan = QueryPlan(
+        objective="Highest invoice in each country",
+        source_tables=["public.invoice"],
+        required_columns=[
+            "public.invoice.billing_country",
+            "public.invoice.invoice_id",
+            "public.invoice.total",
+        ],
+        row_grain="one row per billing country",
+        output_columns=["billing_country", "invoice_id", "total", "rank"],
+        requires_ordering=True,
+    )
+
+    rejected = validate_query_plan_intent(
+        plan,
+        {},
+        "每个账单国家或地区金额最高的一笔订单是什么？",
+    )
+    accepted = validate_query_plan_intent(
+        plan.model_copy(update={"partition_limit": 1}),
+        {},
+        "每个账单国家或地区金额最高的一笔订单是什么？",
+    )
+
+    assert rejected.issues == [
+        "top_per_group_limit_mismatch:expected=1:planned=none"
+    ]
+    assert accepted.passed is True
+
+
+def test_sql_alignment_requires_planned_grain_key_in_group_by() -> None:
+    plan = _sales_plan()
+    missing_key = validate_sql_against_query_plan(
+        plan,
+        """
+        SELECT st.name AS territory_name, SUM(soh.totaldue) AS total_sales
+        FROM sales.salesorderheader AS soh
+        JOIN sales.salesterritory AS st ON st.territoryid = soh.territoryid
+        GROUP BY st.name
+        ORDER BY total_sales DESC
+        """,
+        dialect="postgres",
+    )
+    aligned = validate_sql_against_query_plan(
+        plan,
+        """
+        SELECT st.name AS territory_name, SUM(soh.totaldue) AS total_sales
+        FROM sales.salesorderheader AS soh
+        JOIN sales.salesterritory AS st ON st.territoryid = soh.territoryid
+        GROUP BY st.territoryid, st.name
+        ORDER BY total_sales DESC
+        """,
+        dialect="postgres",
+    )
+
+    assert missing_key.issues == [
+        "planned_grain_key_missing_from_group_by:"
+        "sales.salesterritory.territoryid"
+    ]
+    assert aligned.passed is True
+
+
+def test_sql_alignment_supports_expression_grain_key() -> None:
+    plan = QueryPlan(
+        objective="Yearly employee sales",
+        source_tables=["public.invoice"],
+        required_columns=["public.invoice.invoice_date", "public.invoice.total"],
+        metric_expressions=["SUM(invoice.total)"],
+        dimensions=["EXTRACT(YEAR FROM public.invoice.invoice_date)"],
+        grain_keys=["EXTRACT(YEAR FROM public.invoice.invoice_date)"],
+        row_grain="one row per year",
+        output_columns=["sales_year", "sales_total"],
+        requires_aggregation=True,
+        requires_grouping=True,
+    )
+    sql = """
+        SELECT EXTRACT(YEAR FROM i.invoice_date) AS sales_year,
+               SUM(i.total) AS sales_total
+        FROM public.invoice AS i
+        GROUP BY EXTRACT(YEAR FROM i.invoice_date)
+    """
+
+    check = validate_sql_against_query_plan(plan, sql, dialect="postgres")
+
+    assert check.passed is True
+
+
+def test_sql_alignment_recognizes_columns_inside_aggregate_filter() -> None:
+    plan = QueryPlan(
+        objective="Keep customers with at least seven invoices",
+        source_tables=["public.customer", "public.invoice"],
+        required_columns=["public.customer.customer_id", "public.invoice.invoice_id"],
+        metric_expressions=["COUNT(invoice.invoice_id)"],
+        dimensions=["public.customer.customer_id"],
+        grain_keys=["public.customer.customer_id"],
+        filters=[
+            QueryPlanFilter(
+                column="COUNT(invoice.invoice_id)",
+                operator=">=",
+                value_description="7",
+            )
+        ],
+        row_grain="one row per customer",
+        output_columns=["customer_id", "invoice_count"],
+        join_path=["customer.customer_id = invoice.customer_id"],
+        requires_aggregation=True,
+        requires_grouping=True,
+    )
+    check = validate_sql_against_query_plan(
+        plan,
+        """
+        SELECT c.customer_id, COUNT(i.invoice_id) AS invoice_count
+        FROM public.customer c
+        JOIN public.invoice i ON i.customer_id = c.customer_id
+        GROUP BY c.customer_id
+        HAVING COUNT(i.invoice_id) >= 7
+        """,
+        dialect="postgres",
+    )
+
+    assert check.passed
+
+
+def test_sql_alignment_recognizes_rhs_column_in_filter_description() -> None:
+    plan = QueryPlan(
+        objective="Territories below last year",
+        source_tables=["sales.salesterritory"],
+        required_columns=[
+            "sales.salesterritory.name",
+            "sales.salesterritory.salesytd",
+            "sales.salesterritory.saleslastyear",
+        ],
+        filters=[
+            QueryPlanFilter(
+                column="sales.salesterritory.salesytd",
+                operator="<",
+                value_description="saleslastyear",
+            )
+        ],
+        row_grain="one row per territory",
+        output_columns=["name", "salesytd", "saleslastyear"],
+    )
+    check = validate_sql_against_query_plan(
+        plan,
+        """
+        SELECT name, salesytd, saleslastyear
+        FROM sales.salesterritory
+        WHERE salesytd < saleslastyear
+        """,
+        dialect="postgres",
+    )
+
+    assert check.passed
+
+
+def test_sql_alignment_requires_window_and_filter_for_partition_limit() -> None:
+    plan = QueryPlan(
+        objective="Highest invoice in each country",
+        source_tables=["public.invoice"],
+        required_columns=[
+            "public.invoice.billing_country",
+            "public.invoice.invoice_id",
+            "public.invoice.total",
+        ],
+        row_grain="one row per billing country",
+        output_columns=["billing_country", "invoice_id", "total", "rank"],
+        requires_ordering=True,
+        partition_limit=1,
+    )
+    unsafe = validate_sql_against_query_plan(
+        plan,
+        """
+        SELECT i.billing_country, i.invoice_id, i.total, 1 AS rank
+        FROM public.invoice AS i
+        JOIN (
+          SELECT billing_country, MAX(total) AS max_total
+          FROM public.invoice GROUP BY billing_country
+        ) AS m ON m.billing_country = i.billing_country AND m.max_total = i.total
+        ORDER BY i.billing_country
+        """,
+        dialect="postgres",
+    )
+    safe = validate_sql_against_query_plan(
+        plan,
+        """
+        SELECT billing_country, invoice_id, total, country_rank
+        FROM (
+          SELECT billing_country, invoice_id, total,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY billing_country ORDER BY total DESC, invoice_id
+                 ) AS country_rank
+          FROM public.invoice
+        ) AS ranked
+        WHERE country_rank = 1
+        ORDER BY billing_country
+        """,
+        dialect="postgres",
+    )
+
+    assert "planned_partition_limit_window_missing_from_sql" in unsafe.issues
+    assert "planned_partition_limit_filter_missing_from_sql" in unsafe.issues
+    assert safe.passed is True
+
+
+def test_sql_alignment_rejects_rank_for_exact_partition_limit() -> None:
+    plan = QueryPlan(
+        objective="Top three tracks per genre",
+        source_tables=["public.track"],
+        required_columns=["public.track.genre_id", "public.track.track_id"],
+        row_grain="one row per selected track",
+        output_columns=["genre_id", "track_id", "rank"],
+        requires_ordering=True,
+        partition_limit=3,
+    )
+    check = validate_sql_against_query_plan(
+        plan,
+        """
+        SELECT genre_id, track_id, genre_rank
+        FROM (
+          SELECT genre_id, track_id,
+                 RANK() OVER (PARTITION BY genre_id ORDER BY unit_price DESC) AS genre_rank
+          FROM public.track
+        ) ranked
+        WHERE genre_rank <= 3
+        ORDER BY genre_id, genre_rank
+        """,
+        dialect="postgres",
+    )
+
+    assert "planned_partition_limit_requires_row_number" in check.issues
+
+
 def test_submit_query_plan_persists_only_accepted_plan() -> None:
     context = _context(_sales_evidence())
     tool = SubmitQueryPlanTool()
@@ -308,6 +694,48 @@ def test_submit_query_plan_rejects_unresolved_business_question() -> None:
     assert "unresolved_questions" in result.metadata["query_plan_issues"]
 
 
+def test_submit_query_plan_returns_actionable_join_count_repair() -> None:
+    context = _context(
+        {
+            "schema_evidence": {
+                "tables": ["public.track", "public.invoice_line"],
+                "columns": [
+                    "public.track.track_id",
+                    "public.invoice_line.track_id",
+                ],
+                "table_primary_keys": {
+                    "public.track": ["track_id"],
+                    "public.invoice_line": ["invoice_line_id"],
+                },
+            }
+        }
+    )
+    plan = QueryPlan(
+        objective="Count catalog tracks",
+        source_tables=["public.track", "public.invoice_line"],
+        required_columns=[
+            "public.track.track_id",
+            "public.invoice_line.track_id",
+        ],
+        metric_expressions=["COUNT(track.track_id)"],
+        dimensions=["track.media_type_id"],
+        row_grain="one row per media type",
+        output_columns=["media_type_id", "track_count"],
+        join_path=["invoice_line.track_id = track.track_id"],
+        requires_aggregation=True,
+        requires_grouping=True,
+    )
+
+    result = asyncio.run(SubmitQueryPlanTool().execute(context, plan))
+
+    assert result.success is False
+    assert result.metadata["query_plan_repair_hints"] == [
+        "replace COUNT(track.track_id) with "
+        "COUNT(DISTINCT track.track_id)"
+    ]
+    assert "Do not resubmit an unchanged plan" in result.result_for_llm
+
+
 def test_sql_alignment_checks_tables_filters_features_and_output_count() -> None:
     plan = _sales_plan(
         filters=[
@@ -325,7 +753,7 @@ def test_sql_alignment_checks_tables_filters_features_and_output_count() -> None
         FROM sales.salesorderheader AS soh
         JOIN sales.salesterritory AS st ON st.territoryid = soh.territoryid
         WHERE soh.orderdate >= DATE '2024-01-01'
-        GROUP BY st.name
+        GROUP BY st.territoryid, st.name
         ORDER BY total_sales DESC
     """
     drifted_sql = """
@@ -342,6 +770,134 @@ def test_sql_alignment_checks_tables_filters_features_and_output_count() -> None
     assert aligned.passed is True
     assert "output_column_count_mismatch:3!=2" in drifted.issues
     assert any(issue.startswith("planned_filter_missing_from_sql") for issue in drifted.issues)
+
+
+def test_sql_alignment_rejects_unplanned_business_filter() -> None:
+    plan = _sales_plan()
+    sql = """
+        SELECT st.name AS territory_name, SUM(soh.totaldue) AS total_sales
+        FROM sales.salesorderheader AS soh
+        JOIN sales.salesterritory AS st ON st.territoryid = soh.territoryid
+        WHERE st.name = 'Northwest'
+        GROUP BY st.territoryid, st.name
+        ORDER BY total_sales DESC
+    """
+
+    check = validate_sql_against_query_plan(plan, sql, dialect="postgres")
+
+    assert "unplanned_filter_column_in_sql:name" in check.issues
+
+
+def test_sql_alignment_allows_count_star_to_cover_single_table_support_column() -> None:
+    plan = QueryPlan(
+        objective="Count tracks by composer",
+        source_tables=["chinook.public.track"],
+        required_columns=[
+            "chinook.public.track.composer",
+            "chinook.public.track.track_id",
+        ],
+        metric_expressions=["COUNT(*) AS work_count"],
+        dimensions=["chinook.public.track.composer"],
+        grain_keys=["chinook.public.track.composer"],
+        filters=[
+            QueryPlanFilter(
+                column="chinook.public.track.composer",
+                operator="IS NOT NULL",
+                value_description="ignore missing composers",
+            ),
+            QueryPlanFilter(
+                column="chinook.public.track.composer",
+                operator="<> ''",
+                value_description="ignore empty composers",
+            ),
+        ],
+        row_grain="one row per composer",
+        output_columns=["composer", "work_count"],
+        requires_aggregation=True,
+        requires_grouping=True,
+        requires_ordering=True,
+        limit=10,
+    )
+    sql = """
+        SELECT composer, COUNT(*) AS work_count
+        FROM chinook.public.track
+        WHERE composer IS NOT NULL AND composer <> ''
+        GROUP BY composer
+        HAVING COUNT(*) >= 5
+        ORDER BY work_count DESC, composer
+        LIMIT 10
+    """
+
+    check = validate_sql_against_query_plan(plan, sql, dialect="postgres")
+
+    assert check.passed is True
+
+
+def test_sql_alignment_preserves_planned_distinct_entity_count() -> None:
+    plan = QueryPlan(
+        objective="Count catalog tracks by media type without join fan-out",
+        source_tables=[
+            "public.media_type",
+            "public.track",
+            "public.invoice_line",
+        ],
+        required_columns=[
+            "public.media_type.media_type_id",
+            "public.track.track_id",
+            "public.invoice_line.track_id",
+        ],
+        metric_expressions=[
+            "COUNT(DISTINCT track.track_id) AS catalog_track_count",
+            "COUNT(DISTINCT invoice_line.track_id) AS sold_track_count",
+        ],
+        dimensions=["media_type.media_type_id"],
+        row_grain="one row per media type",
+        grain_keys=["public.media_type.media_type_id"],
+        output_columns=[
+            "media_type_id",
+            "catalog_track_count",
+            "sold_track_count",
+        ],
+        join_path=[
+            "track.media_type_id = media_type.media_type_id",
+            "invoice_line.track_id = track.track_id",
+        ],
+        requires_aggregation=True,
+        requires_grouping=True,
+    )
+    unsafe_sql = """
+        SELECT mt.media_type_id,
+               COUNT(t.track_id) AS catalog_track_count,
+               COUNT(DISTINCT il.track_id) AS sold_track_count
+        FROM public.media_type AS mt
+        LEFT JOIN public.track AS t ON t.media_type_id = mt.media_type_id
+        LEFT JOIN public.invoice_line AS il ON il.track_id = t.track_id
+        GROUP BY mt.media_type_id
+    """
+    safe_sql = unsafe_sql.replace(
+        "COUNT(t.track_id)",
+        "COUNT(DISTINCT t.track_id)",
+    )
+
+    unsafe = validate_sql_against_query_plan(plan, unsafe_sql, dialect="postgres")
+    safe = validate_sql_against_query_plan(plan, safe_sql, dialect="postgres")
+    aliased_plan = plan.model_copy(
+        update={
+            "metric_expressions": [
+                "COUNT(DISTINCT t.track_id) AS catalog_track_count",
+                "COUNT(DISTINCT il.track_id) AS sold_track_count",
+            ]
+        }
+    )
+    aliased_safe = validate_sql_against_query_plan(
+        aliased_plan,
+        safe_sql,
+        dialect="postgres",
+    )
+
+    assert "planned_distinct_count_missing_from_sql:track.track_id" in unsafe.issues
+    assert safe.passed is True
+    assert aliased_safe.passed is True
 
 
 def test_rls_registry_requires_and_enforces_accepted_query_plan() -> None:

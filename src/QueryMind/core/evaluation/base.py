@@ -55,6 +55,7 @@ class ExpectedSqlContract(BaseModel):
     """Dataset-owned structural requirements checked against generated SQL."""
 
     required_features: List[str] = Field(default_factory=list)
+    feature_requirement_mode: Literal["blocking", "advisory"] = "blocking"
     required_feature_groups: List[List[str]] = Field(default_factory=list)
     forbidden_features: List[str] = Field(default_factory=list)
     required_columns: List[str] = Field(default_factory=list)
@@ -155,7 +156,13 @@ class AgentResult(BaseModel):
         return [item for item in self.tool_calls if item.tool_name == tool_name]
 
     def get_primary_sql(self, tool_name: str = "run_sql") -> Optional[str]:
-        """Return the last SQL text captured from a tool call."""
+        """Return the last successfully executed SQL, then fall back to last attempt."""
+        for record in reversed(self.tool_calls):
+            if record.tool_name != tool_name or record.success is not True:
+                continue
+            sql = record.arguments.get("sql")
+            if isinstance(sql, str) and sql.strip():
+                return sql.strip()
         for record in reversed(self.tool_calls):
             if record.tool_name != tool_name:
                 continue

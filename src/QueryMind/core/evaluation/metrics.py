@@ -223,6 +223,7 @@ def evaluate_sql_contract(
         return {
             "sql_contract_passed": True,
             "sql_contract_violations": [],
+            "sql_contract_advisories": [],
             "sql_contract_evidence": {},
         }
 
@@ -232,6 +233,7 @@ def evaluate_sql_contract(
         return {
             "sql_contract_passed": False,
             "sql_contract_violations": ["sql_parse_error"],
+            "sql_contract_advisories": [],
             "sql_contract_evidence": {},
         }
 
@@ -304,13 +306,18 @@ def evaluate_sql_contract(
         for value in contract.required_projection_aliases
     }
 
-    violations: List[str] = []
+    feature_violations: List[str] = []
     for feature in sorted(required_features):
         if not feature_presence.get(feature, False):
-            violations.append(f"missing_feature:{feature}")
+            feature_violations.append(f"missing_feature:{feature}")
     for group in required_feature_groups:
         if group and not any(feature_presence.get(feature, False) for feature in group):
-            violations.append(f"missing_feature_group:{'|'.join(sorted(group))}")
+            feature_violations.append(
+                f"missing_feature_group:{'|'.join(sorted(group))}"
+            )
+    violations: List[str] = []
+    if contract.feature_requirement_mode == "blocking":
+        violations.extend(feature_violations)
     for feature in sorted(forbidden_features):
         if feature_presence.get(feature, False):
             violations.append(f"forbidden_feature:{feature}")
@@ -342,6 +349,11 @@ def evaluate_sql_contract(
     return {
         "sql_contract_passed": not violations,
         "sql_contract_violations": violations,
+        "sql_contract_advisories": (
+            feature_violations
+            if contract.feature_requirement_mode == "advisory"
+            else []
+        ),
         "sql_contract_evidence": {
             "features": sorted(
                 name for name, present in feature_presence.items() if present
@@ -353,6 +365,7 @@ def evaluate_sql_contract(
             "filter_columns": sorted(filter_columns),
             "projection_aliases": sorted(projection_aliases),
             "projection_count": projection_count,
+            "feature_requirement_mode": contract.feature_requirement_mode,
         },
     }
 

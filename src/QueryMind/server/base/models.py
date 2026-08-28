@@ -3,8 +3,7 @@ Request and response models for QueryMind server endpoints.
 """
 
 import time
-import uuid
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -19,6 +18,11 @@ class ChatRequest(BaseModel):
     )
     metadata: Dict[str, Any] = Field(
         default_factory=dict, description="Additional metadata"
+    )
+    runtime: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Process-local callbacks and resolved identity",
+        exclude=True,
     )
 
 

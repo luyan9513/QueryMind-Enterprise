@@ -246,6 +246,7 @@ def _build_config_snapshot(
     return {
         "dataset_path": str(dataset_path),
         "dataset_hash": dataset_hash_value,
+        "code_snapshot_id": os.getenv("EVAL_CODE_SNAPSHOT_ID", ""),
         "database_id": runtime.database_id,
         "database_snapshot_id": os.getenv("EVAL_DATABASE_SNAPSHOT_ID", ""),
         "dialect": runtime.dialect,

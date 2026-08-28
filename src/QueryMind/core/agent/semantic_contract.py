@@ -190,6 +190,11 @@ def format_semantic_contracts_for_llm(snapshot: dict[str, Any]) -> str:
                     str(item) for item in raw.get("required_filter_columns") or []
                 )
             )
+        if raw.get("notes"):
+            lines.append(
+                "  Data-source notes: "
+                + " ".join(str(item) for item in raw.get("notes") or [])
+            )
     return "\n".join(lines)
 
 
@@ -240,14 +245,12 @@ def validate_query_plan_semantic_contracts(
         for column in contract.get("required_columns") or []:
             if not any(_identifier_matches(column, item) for item in plan_columns):
                 issues.append(f"contract_column_missing_from_plan:{contract_id}:{column}")
-        accepted = {
-            _canonical_expression(item, dialect)
-            for item in contract.get("accepted_expressions") or []
-        }
-        planned = {
-            _canonical_expression(item, dialect) for item in plan_expressions
-        }
-        if accepted and accepted.isdisjoint(planned):
+        accepted_expressions = list(contract.get("accepted_expressions") or [])
+        if accepted_expressions and not _expressions_compatible(
+            accepted_expressions,
+            plan_expressions,
+            dialect,
+        ):
             issues.append(f"contract_expression_missing_from_plan:{contract_id}")
         output_aliases = _contract_output_aliases(contract)
         if output_aliases and not any(
@@ -324,6 +327,7 @@ def validate_sql_against_semantic_contracts(
         for column in where.find_all(exp.Column)
     ]
     projection_expressions: set[str] = set()
+    projection_expression_sql: list[str] = []
     projection_aliases: list[str] = []
     advisories = list(plan_check.advisories)
     selects = list(statement.find_all(exp.Select))
@@ -338,6 +342,11 @@ def validate_sql_against_semantic_contracts(
                 for node in base.walk()
                 if isinstance(node, exp.Expression)
             )
+            projection_expression_sql.extend(
+                node.sql(dialect=str(dialect or "").strip() or None)
+                for node in base.walk()
+                if isinstance(node, exp.Expression)
+            )
 
     for contract_id in cited_ids:
         contract = metrics.get(contract_id)
@@ -349,11 +358,19 @@ def validate_sql_against_semantic_contracts(
         for column in contract.get("required_columns") or []:
             if not any(_identifier_matches(column, item) for item in columns):
                 issues.append(f"contract_column_missing_from_sql:{contract_id}:{column}")
+        accepted_expressions = list(contract.get("accepted_expressions") or [])
         accepted = {
-            _canonical_expression(item, dialect)
-            for item in contract.get("accepted_expressions") or []
+            _canonical_expression(item, dialect) for item in accepted_expressions
         }
-        if accepted and accepted.isdisjoint(projection_expressions):
+        if (
+            accepted
+            and accepted.isdisjoint(projection_expressions)
+            and not _expressions_compatible(
+                accepted_expressions,
+                projection_expression_sql,
+                dialect,
+            )
+        ):
             issues.append(f"contract_expression_missing_from_sql:{contract_id}")
         output_aliases = _contract_output_aliases(contract)
         if output_aliases and not any(
@@ -450,12 +467,28 @@ def _qualified_table_name(table: exp.Table) -> str:
     return ".".join(part for part in parts if part)
 
 
+def _parse_expression_select(value: Any, dialect: str | None) -> exp.Expression:
+    text = str(value or "")
+    candidates = [text]
+    without_alias = re.sub(r"(?is)\s+as\s+[^()]+$", "", text).strip()
+    if without_alias != text:
+        candidates.append(without_alias)
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            return parse_one(
+                f"SELECT {candidate}",
+                read=str(dialect or "").strip() or None,
+            )
+        except Exception as exc:
+            last_error = exc
+    assert last_error is not None
+    raise last_error
+
+
 def _canonical_expression(value: Any, dialect: str | None) -> str:
     try:
-        statement = parse_one(
-            f"SELECT {value}",
-            read=str(dialect or "").strip() or None,
-        )
+        statement = _parse_expression_select(value, dialect)
         select = statement if isinstance(statement, exp.Select) else statement.find(exp.Select)
         if select is None or not select.expressions:
             return ""
@@ -478,6 +511,114 @@ def _canonical_expression_node(node: exp.Expression, dialect: str | None) -> str
         normalize=True,
         pretty=False,
     ).casefold()
+
+
+def _simple_aggregate_signature(
+    value: Any,
+    dialect: str | None,
+) -> tuple[str, str] | None:
+    """Return a safe relaxed signature for a one-column aggregate.
+
+    Qualification, DISTINCT, FILTER/CASE conditions, aliases, and outer
+    display wrappers do not change the metric identity. Arithmetic inside the
+    aggregate remains strict so SUM(price * quantity) cannot match SUM(price).
+    """
+    try:
+        statement = _parse_expression_select(value, dialect)
+    except Exception:
+        return None
+    aggregates = list(statement.find_all(exp.AggFunc))
+    if len(aggregates) != 1:
+        return None
+    aggregate = aggregates[0]
+    if any(
+        isinstance(node, (exp.Add, exp.Sub, exp.Mul, exp.Div, exp.Mod))
+        for node in aggregate.walk()
+    ):
+        return None
+    columns = {
+        str(column.name or "").strip().casefold()
+        for column in aggregate.find_all(exp.Column)
+        if str(column.name or "").strip()
+    }
+    if len(columns) != 1:
+        return None
+    return aggregate.key.casefold(), next(iter(columns))
+
+
+def _expressions_compatible(
+    accepted_expressions: list[Any],
+    candidate_expressions: list[Any],
+    dialect: str | None,
+) -> bool:
+    accepted_canonical = {
+        _canonical_expression(item, dialect) for item in accepted_expressions
+    }
+    candidate_canonical = {
+        _canonical_expression(item, dialect) for item in candidate_expressions
+    }
+    if not accepted_canonical.isdisjoint(candidate_canonical):
+        return True
+    accepted_signatures = {
+        signature
+        for item in accepted_expressions
+        if (signature := _simple_aggregate_signature(item, dialect)) is not None
+    }
+    candidate_signatures = {
+        signature
+        for item in candidate_expressions
+        if (signature := _simple_aggregate_signature(item, dialect)) is not None
+    }
+    if accepted_signatures.intersection(candidate_signatures):
+        return True
+    return any(
+        _candidate_supports_simple_aggregate(item, signature, dialect)
+        for item in candidate_expressions
+        for signature in accepted_signatures
+    )
+
+
+def _candidate_supports_simple_aggregate(
+    value: Any,
+    signature: tuple[str, str],
+    dialect: str | None,
+) -> bool:
+    try:
+        statement = _parse_expression_select(value, dialect)
+    except Exception:
+        return False
+    aggregates = list(statement.find_all(exp.AggFunc))
+    if len(aggregates) != 1:
+        return False
+    aggregate = aggregates[0]
+    function_name, target_column = signature
+    if aggregate.key.casefold() != function_name:
+        return False
+    if any(
+        isinstance(node, (exp.Add, exp.Sub, exp.Mul, exp.Div, exp.Mod))
+        for node in aggregate.walk()
+    ):
+        return False
+    cases = list(aggregate.find_all(exp.Case))
+    if not cases:
+        return False
+    value_columns: set[str] = set()
+    for case in cases:
+        value_nodes = [case.args.get("default")]
+        value_nodes.extend(
+            item.args.get("true")
+            for item in case.args.get("ifs") or []
+            if isinstance(item, exp.If)
+        )
+        for node in value_nodes:
+            if not isinstance(node, exp.Expression):
+                continue
+            value_columns.update(
+                str(column.name or "").strip().casefold()
+                for column in node.find_all(exp.Column)
+                if str(column.name or "").strip()
+            )
+    return value_columns == {target_column}
 
 
 __all__ = [

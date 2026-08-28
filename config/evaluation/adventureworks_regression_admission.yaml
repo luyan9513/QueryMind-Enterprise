@@ -1,0 +1,40 @@
+profile:
+  name: "AdventureWorks cross-source regression admission v0.10.1"
+  database_id: "adventureworks"
+  minimum_cases: 24
+  required_repeats: 3
+  minimum_by_difficulty:
+    easy: 14
+    medium: 10
+  minimum_by_category:
+    aggregation: 7
+    join: 4
+    topk: 2
+    time_series: 2
+    comparison: 3
+    window: 1
+    subquery: 1
+  minimum_by_business_domain:
+    sales: 9
+    product: 5
+    customer: 3
+    purchasing: 3
+    inventory: 2
+    human_resources: 2
+  minimum_by_tag:
+    aggregation: 20
+    join: 14
+    ordering: 15
+    topk: 3
+    time_series: 3
+    date_filter: 3
+    null_handling: 4
+  quality_thresholds:
+    reference_sql_success_rate: 1.0
+    schema_recall: 0.9
+    business_accuracy: 0.75
+    wrong_executed_rate: 0.15
+    automatic_answer_coverage: 0.85
+    p95_agent_execution_time_ms: 30000
+    repeat_consistency_rate: 0.8
+    process_trace_coverage: 0.95

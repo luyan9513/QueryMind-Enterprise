@@ -255,6 +255,7 @@ def test_detailed_markdown_explains_accuracy_sql_and_failure(tmp_path: Path) -> 
             "business_result_correct": False,
             "sql_contract_passed": False,
             "sql_contract_violations": ["missing_column:total"],
+            "sql_contract_advisories": ["missing_feature:cte"],
             "schema_recall": 1.0,
             "tool_call_count": 2,
             "primary_failure": "query_contract_failure",
@@ -274,6 +275,8 @@ def test_detailed_markdown_explains_accuracy_sql_and_failure(tmp_path: Path) -> 
     assert "SUM(subtotal)" in rendered
     assert "哪里错了" in rendered
     assert "缺少必要字段：total" in rendered
+    assert "SQL 实现形态 advisory 题数：1" in rendered
+    assert "SQL 实现形态提示：缺少必要 SQL 结构：cte" in rendered
     assert "为什么错" in rendered
     assert "建议怎么改" in rendered
 

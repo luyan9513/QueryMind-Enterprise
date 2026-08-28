@@ -7,28 +7,32 @@ from .base import (
     ExpectedOutcome,
     ExpectedSchema,
     ExpectedSqlContract,
-    ResultComparisonPolicy,
     JudgeInput,
     JudgeResult,
+    ResultComparisonPolicy,
     SqlExecutionArtifact,
     SqlTestCase,
     ToolInvocationRecord,
 )
-from .dataset import EvaluationDataset
 from .benchmark_admission import (
     BenchmarkAdmissionAssessment,
     BenchmarkAdmissionProfile,
+    BenchmarkCaseStability,
     BenchmarkCoverageDeficit,
+    BenchmarkQualityAssessment,
+    BenchmarkQualityGate,
     BenchmarkQualityThresholds,
+    BenchmarkSplitQuality,
     assess_benchmark_admission,
+    assess_benchmark_quality,
     load_benchmark_admission_profile,
 )
+from .dataset import EvaluationDataset
 from .evaluators import SqlAccuracyEvaluator
 from .mode import EvaluationMode, parse_evaluation_mode
 from .outcome import ExpectedOutcomeEvaluator
 from .report import ComparisonReport, EvaluationReport
 from .runner import EvaluationRunner
-from .validation import DatasetValidationError, EvaluationDatasetValidator, ValidationIssue
 from .runtime import (
     DictEvaluationRuntimeResolver,
     EvaluationConversationStore,
@@ -37,13 +41,18 @@ from .runtime import (
     EvaluationSession,
     StaticUserResolver,
 )
+from .validation import DatasetValidationError, EvaluationDatasetValidator, ValidationIssue
 
 __all__ = [
     "AgentResult",
     "BenchmarkAdmissionAssessment",
     "BenchmarkAdmissionProfile",
     "BenchmarkCoverageDeficit",
+    "BenchmarkCaseStability",
+    "BenchmarkSplitQuality",
     "BenchmarkQualityThresholds",
+    "BenchmarkQualityAssessment",
+    "BenchmarkQualityGate",
     "EvaluationDataset",
     "EvaluationResult",
     "EvaluationMode",
@@ -73,5 +82,6 @@ __all__ = [
     "ToolInvocationRecord",
     "parse_evaluation_mode",
     "assess_benchmark_admission",
+    "assess_benchmark_quality",
     "load_benchmark_admission_profile",
 ]

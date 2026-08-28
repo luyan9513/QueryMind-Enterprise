@@ -16,7 +16,7 @@ from .failure_attribution import enrich_failure_attribution
 from .metrics import enrich_result_metrics, merge_token_usage
 from .report import EvaluationReport
 from .runtime import EvaluationRuntimeResolver
-from .sanitization import sanitize_trace_metadata, redact_sensitive_text
+from .sanitization import redact_sensitive_text, sanitize_trace_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +106,7 @@ class EvaluationRunner:
             agent_start: float | None = None
             trace_error: Optional[str] = None
             evaluation_mode = "unknown"
+            process_events: list[dict[str, Any]] = []
 
             try:
                 runtime = await self.runtime_resolver.resolve(test_case)
@@ -115,6 +116,22 @@ class EvaluationRunner:
                 session = await runtime.create_session(test_case)
                 user_id = session.user.id
                 conversation_id = session.conversation_id
+                process_started = time.perf_counter()
+
+                async def event_sink(event_type: str, data: dict[str, Any]) -> None:
+                    process_events.append(
+                        {
+                            "event_type": event_type,
+                            "elapsed_ms": (
+                                time.perf_counter() - process_started
+                            )
+                            * 1000,
+                            "data": sanitize_trace_metadata(data),
+                        }
+                    )
+
+                session.request_context.runtime["event_sink"] = event_sink
+                session.request_context.user = session.user
                 agent_start = time.perf_counter()
                 async for component in session.agent.send_message(
                     request_context=session.request_context,
@@ -157,6 +174,16 @@ class EvaluationRunner:
                 "agent_run_time_ms": execution_time_ms,
                 "llm_call_count": llm_call_count,
                 "evaluation_mode": evaluation_mode,
+                "process_event_count": len(process_events),
+                "process_model_call_count": sum(
+                    event["event_type"] == "model.completed"
+                    for event in process_events
+                ),
+                "process_tool_call_count": sum(
+                    event["event_type"] == "tool.completed"
+                    for event in process_events
+                ),
+                "process_trace": process_events,
             }
             if trace_error is not None:
                 metadata["trace_load_error"] = redact_sensitive_text(trace_error)

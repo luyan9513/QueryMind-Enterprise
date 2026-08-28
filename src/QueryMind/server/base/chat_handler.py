@@ -4,7 +4,7 @@ Framework-agnostic chat handling logic for QueryMind.
 
 import os
 import uuid
-from typing import AsyncGenerator, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, AsyncGenerator, Optional
 
 from .models import ChatRequest, ChatResponse, ChatStreamChunk
 
@@ -39,6 +39,7 @@ class ChatHandler:
         conversation_id: str,
         request_id: str,
         metadata: Optional[dict] = None,
+        runtime: Optional[dict] = None,
     ) -> "RequestContext":
         """Create RequestContext from metadata.
         
@@ -54,11 +55,13 @@ class ChatHandler:
         
         metadata = dict(metadata or {})
         metadata["allow_metadata_query"] = _env_bool("ALLOW_METADATA_QUERY", False)
-        user_info = metadata.get("user") if metadata else None
+        runtime = dict(runtime or {})
+        user_info = runtime.get("resolved_user")
         
         return RequestContext(
             metadata=metadata,
             user=user_info,
+            runtime=runtime,
             conversation_id=conversation_id,
             request_id=request_id,
         )
@@ -82,6 +85,7 @@ class ChatHandler:
             conversation_id=conversation_id,
             request_id=request_id,
             metadata=request.metadata,
+            runtime=request.runtime,
         )
 
         # Call agent.send_message with correct interface

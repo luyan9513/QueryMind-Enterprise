@@ -1,34 +1,38 @@
 from __future__ import annotations
 
+import sys
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-import sys
 
 import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from evals.rescore import rescore_result  # noqa: E402
 from QueryMind.core.evaluation import (  # noqa: E402
     AgentResult,
+    BenchmarkAdmissionProfile,
+    BenchmarkQualityThresholds,
     EvaluationDataset,
     EvaluationReport,
     EvaluationResult,
-    ExpectedSqlContract,
     ExpectedSchema,
+    ExpectedSqlContract,
     ResultComparisonPolicy,
     SqlExecutionArtifact,
     SqlTestCase,
     ToolInvocationRecord,
+    assess_benchmark_quality,
 )
 from QueryMind.core.evaluation.failure_attribution import classify_failure  # noqa: E402
 from QueryMind.core.evaluation.metrics import (  # noqa: E402
     calculate_schema_recall,
     compare_execution_artifacts,
     enrich_result_metrics,
-    evaluate_sql_contract,
     estimate_usage_cost_usd,
+    evaluate_sql_contract,
     fingerprint_dataframe,
     wilson_score_interval,
 )
@@ -37,7 +41,6 @@ from QueryMind.core.evaluation.sanitization import (  # noqa: E402
     sanitize_export_payload,
     sanitize_trace_metadata,
 )
-from evals.rescore import rescore_result  # noqa: E402
 
 
 def _test_case() -> SqlTestCase:
@@ -61,6 +64,323 @@ def _agent_result(tool_calls: list[ToolInvocationRecord] | None = None) -> Agent
         user_id="eval-user",
         tool_calls=tool_calls or [],
     )
+
+
+def test_repeated_benchmark_quality_includes_process_trace_gate() -> None:
+    profile = BenchmarkAdmissionProfile(
+        name="demo",
+        database_id="chinook",
+        minimum_cases=1,
+        required_repeats=3,
+        quality_thresholds=BenchmarkQualityThresholds(
+            reference_sql_success_rate=1,
+            schema_recall=0.9,
+            business_accuracy=0.8,
+            wrong_executed_rate=0.1,
+            automatic_answer_coverage=0.85,
+            p95_agent_execution_time_ms=30000,
+            repeat_consistency_rate=0.85,
+            process_trace_coverage=0.95,
+        ),
+    )
+    case = SqlTestCase(
+        id="case-1",
+        database_id="chinook",
+        dialect="postgres",
+        query="统计收入",
+        ground_truth_sql="SELECT 1",
+    )
+    reports = []
+    for _ in range(3):
+        agent_result = AgentResult(
+            test_case_id=case.id,
+            database_id=case.database_id,
+            conversation_id="conv-1",
+            user_id="eval",
+            execution_time_ms=100,
+            metadata={"process_event_count": 4},
+        )
+        result = EvaluationResult(
+            test_case=case,
+            agent_result=agent_result,
+            metadata={
+                "schema_recall": 1.0,
+                "business_result_correct": True,
+                "agent_sql_execution_success": True,
+            },
+        )
+        reports.append(
+            EvaluationReport(
+                dataset_name="demo",
+                results=[result],
+                evaluator_names=[],
+                metadata={
+                    "config_snapshot": {
+                        "dataset_hash": "dataset-v1",
+                        "code_snapshot_id": "code-v1",
+                        "database_id": "chinook",
+                        "database_snapshot_id": "database-v1",
+                        "schema_snapshot_id": "schema-v1",
+                        "agent_model": "agent-v1",
+                        "agent_provider": "test",
+                        "judge_model": "judge-v1",
+                        "judge_provider": "test",
+                    }
+                },
+            )
+        )
+
+    assessment = assess_benchmark_quality(
+        reports,
+        profile,
+        reference_sql_success_rate=1.0,
+    )
+
+    assert assessment.quality_ready is True
+    assert assessment.metrics["repeat_consistency_rate"] == 1.0
+    assert assessment.metrics["process_trace_coverage"] == 1.0
+    assert assessment.comparability_issues == []
+
+
+def test_repeated_benchmark_quality_fails_closed_when_runs_are_not_comparable() -> None:
+    profile = BenchmarkAdmissionProfile(
+        name="demo",
+        database_id="chinook",
+        minimum_cases=1,
+        required_repeats=2,
+        quality_thresholds=BenchmarkQualityThresholds(
+            reference_sql_success_rate=0,
+            schema_recall=0,
+            business_accuracy=0,
+            wrong_executed_rate=1,
+            automatic_answer_coverage=0,
+            p95_agent_execution_time_ms=30000,
+            repeat_consistency_rate=0,
+            process_trace_coverage=0,
+        ),
+    )
+    case = SqlTestCase(
+        id="case-1",
+        database_id="chinook",
+        dialect="postgres",
+        query="统计收入",
+        ground_truth_sql="SELECT 1",
+    )
+    reports = []
+    for model in ("agent-v1", "agent-v2"):
+        reports.append(
+            EvaluationReport(
+                dataset_name="demo",
+                results=[
+                    EvaluationResult(
+                        test_case=case,
+                        agent_result=AgentResult(
+                            test_case_id=case.id,
+                            database_id=case.database_id,
+                            conversation_id="conv-1",
+                            user_id="eval",
+                            execution_time_ms=100,
+                        ),
+                        metadata={"business_result_correct": True},
+                    )
+                ],
+                metadata={
+                    "config_snapshot": {
+                        "dataset_hash": "dataset-v1",
+                        "code_snapshot_id": "code-v1",
+                        "database_id": "chinook",
+                        "database_snapshot_id": "database-v1",
+                        "schema_snapshot_id": "schema-v1",
+                        "agent_model": model,
+                        "agent_provider": "test",
+                        "judge_model": "judge-v1",
+                        "judge_provider": "test",
+                    }
+                },
+            )
+        )
+
+    assessment = assess_benchmark_quality(
+        reports,
+        profile,
+        reference_sql_success_rate=1.0,
+    )
+
+    assert assessment.quality_ready is False
+    assert "agent_model:repeat_1!=repeat_2" in assessment.comparability_issues
+
+
+def test_repeated_benchmark_quality_aligns_concurrent_results_by_case_id() -> None:
+    profile = BenchmarkAdmissionProfile(
+        name="ordered-by-id",
+        database_id="chinook",
+        minimum_cases=2,
+        required_repeats=2,
+        quality_thresholds=BenchmarkQualityThresholds(
+            reference_sql_success_rate=0,
+            schema_recall=0,
+            business_accuracy=0,
+            wrong_executed_rate=1,
+            automatic_answer_coverage=0,
+            p95_agent_execution_time_ms=30000,
+            repeat_consistency_rate=1,
+            process_trace_coverage=0,
+        ),
+    )
+    snapshot = {
+        "dataset_hash": "dataset-v1",
+        "code_snapshot_id": "code-v1",
+        "database_id": "chinook",
+        "database_snapshot_id": "database-v1",
+        "schema_snapshot_id": "schema-v1",
+        "agent_model": "agent-v1",
+        "agent_provider": "test",
+        "judge_model": "judge-v1",
+        "judge_provider": "test",
+    }
+
+    def make_result(case_id: str, correct: bool) -> EvaluationResult:
+        case = SqlTestCase(
+            id=case_id,
+            database_id="chinook",
+            dialect="postgres",
+            query="统计收入",
+            ground_truth_sql="SELECT 1",
+        )
+        return EvaluationResult(
+            test_case=case,
+            agent_result=AgentResult(
+                test_case_id=case_id,
+                database_id="chinook",
+                conversation_id=f"conv-{case_id}",
+                user_id="eval",
+                execution_time_ms=100,
+            ),
+            metadata={"business_result_correct": correct},
+        )
+
+    first = [make_result("case-a", True), make_result("case-b", False)]
+    second = [make_result("case-b", False), make_result("case-a", True)]
+    assessment = assess_benchmark_quality(
+        [
+            EvaluationReport(
+                dataset_name="demo",
+                results=first,
+                metadata={"config_snapshot": snapshot},
+            ),
+            EvaluationReport(
+                dataset_name="demo",
+                results=second,
+                metadata={"config_snapshot": snapshot},
+            ),
+        ],
+        profile,
+        reference_sql_success_rate=1,
+    )
+
+    assert assessment.metrics["repeat_consistency_rate"] == 1
+
+
+def test_repeated_benchmark_quality_builds_case_and_split_failure_ledger() -> None:
+    profile = BenchmarkAdmissionProfile(
+        name="failure-ledger",
+        database_id="chinook",
+        minimum_cases=3,
+        required_repeats=3,
+        quality_thresholds=BenchmarkQualityThresholds(
+            reference_sql_success_rate=0,
+            schema_recall=0,
+            business_accuracy=0,
+            wrong_executed_rate=1,
+            automatic_answer_coverage=0,
+            p95_agent_execution_time_ms=30000,
+            repeat_consistency_rate=0,
+            process_trace_coverage=0,
+        ),
+    )
+    snapshot = {
+        "dataset_hash": "dataset-v1",
+        "code_snapshot_id": "code-v1",
+        "database_id": "chinook",
+        "database_snapshot_id": "database-v1",
+        "schema_snapshot_id": "schema-v1",
+        "agent_model": "agent-v1",
+        "agent_provider": "test",
+        "judge_model": "judge-v1",
+        "judge_provider": "test",
+    }
+    outcomes = {
+        "case-a": ("development", [False, False, False]),
+        "case-b": ("test", [True, False, True]),
+        "case-c": ("holdout", [True, True, True]),
+    }
+    reports = []
+    for repeat_index in range(3):
+        results = []
+        for case_id, (split, values) in outcomes.items():
+            test_case = SqlTestCase(
+                id=case_id,
+                database_id="chinook",
+                dialect="postgres",
+                query="统计收入",
+                ground_truth_sql="SELECT 1",
+                metadata={"benchmark_split": split},
+            )
+            results.append(
+                EvaluationResult(
+                    test_case=test_case,
+                    agent_result=AgentResult(
+                        test_case_id=case_id,
+                        database_id="chinook",
+                        conversation_id=f"conv-{case_id}-{repeat_index}",
+                        user_id="eval",
+                        execution_time_ms=100,
+                    ),
+                    metadata={
+                        "business_result_correct": values[repeat_index],
+                        "agent_sql_execution_success": True,
+                    },
+                )
+            )
+        reports.append(
+            EvaluationReport(
+                dataset_name="demo",
+                results=results,
+                metadata={"config_snapshot": snapshot},
+            )
+        )
+
+    assessment = assess_benchmark_quality(
+        reports,
+        profile,
+        reference_sql_success_rate=1,
+    )
+
+    assert assessment.metrics["business_accuracy"] == pytest.approx(5 / 9)
+    assert assessment.metrics["wrong_executed_rate"] == pytest.approx(4 / 9)
+    assert assessment.metrics["repeat_consistency_rate"] == pytest.approx(2 / 3)
+    assert assessment.stable_incorrect_case_ids == ["case-a"]
+    assert assessment.flaky_case_ids == ["case-b"]
+    assert assessment.case_stability[0].model_dump() == {
+        "case_id": "case-a",
+        "benchmark_split": "development",
+        "correct_repeats": 0,
+        "total_repeats": 3,
+        "status": "stable_incorrect",
+    }
+    assert assessment.split_metrics["development"].model_dump() == {
+        "case_count": 1,
+        "sample_count": 3,
+        "business_accuracy": 0.0,
+        "wrong_executed_rate": 1.0,
+        "repeat_consistency_rate": 1.0,
+    }
+    assert assessment.split_metrics["test"].business_accuracy == pytest.approx(2 / 3)
+    assert assessment.split_metrics["test"].wrong_executed_rate == pytest.approx(1 / 3)
+    assert assessment.split_metrics["test"].repeat_consistency_rate == 0
+    assert assessment.split_metrics["holdout"].business_accuracy == 1
+    assert "## Failure stability ledger" in assessment.to_markdown()
+    assert "## Metrics by benchmark split" in assessment.to_markdown()
 
 
 def test_dataframe_fingerprint_supports_ordered_and_unordered_comparison() -> None:
@@ -187,7 +507,14 @@ def test_chinook_date_granularity_is_explicit_and_case_scoped() -> None:
         for case in dataset.test_cases
     }
 
-    date_scoped_cases = {"ch_zh_018", "ch_zh_033", "ch_zh_037"}
+    date_scoped_cases = {
+        "ch_zh_018",
+        "ch_zh_033",
+        "ch_zh_037",
+        "ch_zh_067",
+        "ch_zh_069",
+        "ch_zh_091",
+    }
     assert all(policies[case_id] == "date" for case_id in date_scoped_cases)
     assert all(
         granularity == "exact"
@@ -266,6 +593,24 @@ def test_sql_contract_accepts_any_declared_required_feature_group_member() -> No
     ]
 
 
+def test_sql_contract_can_report_shape_features_as_advisory() -> None:
+    result = evaluate_sql_contract(
+        "SELECT customer_id, COUNT(*) FROM invoice GROUP BY customer_id",
+        ExpectedSqlContract(
+            required_features=["cte", "where"],
+            feature_requirement_mode="advisory",
+        ),
+        dialect="postgres",
+    )
+
+    assert result["sql_contract_passed"] is True
+    assert result["sql_contract_violations"] == []
+    assert result["sql_contract_advisories"] == [
+        "missing_feature:cte",
+        "missing_feature:where",
+    ]
+
+
 def test_chinook_average_customer_spend_contract_allows_where_or_having() -> None:
     dataset = EvaluationDataset.from_yaml(
         Path(__file__).resolve().parents[1]
@@ -280,18 +625,27 @@ def test_chinook_average_customer_spend_contract_allows_where_or_having() -> Non
     assert "where" not in test_case.expected_sql_contract.required_features
 
 
-def test_chinook_v09_development_batches_have_valid_reference_contracts() -> None:
+def test_chinook_v010_frozen_splits_have_valid_reference_contracts() -> None:
     dataset_path = (
         Path(__file__).resolve().parents[1]
         / "src/evals/datasets/chinook_business_zh.yaml"
     )
     dataset = EvaluationDataset.from_yaml(dataset_path)
 
-    assert len(dataset) == 50
+    assert len(dataset) == 100
     assert {case.id for case in dataset.test_cases} == {
-        f"ch_zh_{index:03d}" for index in range(1, 51)
+        f"ch_zh_{index:03d}" for index in range(1, 101)
     }
+    assert [
+        sum(case.metadata.get("benchmark_split") == split for case in dataset)
+        for split in ("development", "test", "holdout")
+    ] == [60, 20, 20]
     assert all(case.expected_schema and case.expected_schema.tables for case in dataset)
+    assert all(
+        case.expected_sql_contract is None
+        or case.expected_sql_contract.feature_requirement_mode == "advisory"
+        for case in dataset
+    )
     assert all(
         evaluate_sql_contract(
             case.ground_truth_sql,

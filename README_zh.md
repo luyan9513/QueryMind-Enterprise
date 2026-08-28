@@ -16,9 +16,10 @@ QueryMind 是一个面向企业经营数据问答的可治理 Text2SQL Agent。�
 - 在只读 PostgreSQL 账号下通过 `pg_catalog` 抽取主外键，支持复合外键和跨 Schema 关系。
 - 实现 LLM 会话标题、历史自动刷新、Workflow 消息持久化和失败回退。
 - 建立 24 题 AdventureWorks 中文业务评测，记录完整结果正确率、首次成功率、Schema Recall、工具轮数、延迟、成本和失败归因。
-- 增加数据库级 Schema Memory 隔离，并以独立 Chinook 数据源、12 项业务指标和评测集验证第二数据源接入流程；v0.9 开发集当前完成 50/100 题。
+- 增加数据库级 Schema Memory 隔离，并以独立 Chinook 数据源、12 项业务指标和 100 题冻结评测集验证第二数据源接入流程。
 - 增加有边界的 Agent Run/Event 生命周期：幂等创建、租户/用户隔离读取、事件游标、乐观版本、取消和单进程原子开发 Store。
-- 在 AdventureWorks 68 张表、456 个字段和 Chinook 11 张表上完成验证；当前 Python 正式测试范围为 `229 passed, 1 warning`。
+- 增加基于 Query Plan 和 Semantic Contract 的确定性 Result Validation；只有校验通过的最近一次成功 SQL 才能产生 `result.validated`，缺失、失败或无法确定时 Run 失败关闭。
+- 在 AdventureWorks 68 张表、456 个字段和 Chinook 11 张表上完成验证；Chinook 100/100 参考 SQL 已通过只读验收。
 
 ### 当前证据与能力边界
 
@@ -27,8 +28,8 @@ QueryMind 是一个面向企业经营数据问答的可治理 Text2SQL Agent。�
 | AdventureWorks 落地 | PostgreSQL 只读链路、68 张表、456 个字段、Schema Memory 初始化 | 本机开发环境，不代表生产部署 |
 | Text2SQL 评测 | 固定 24 题、确定性结果对比、S0-S5 对照、逐题 SQL 与失败归因 | 结果只适用于记录的数据集、快照、模型和参数 |
 | 多数据源 | AdventureWorks 与独立的 11 表 Chinook 接入和准入流程 | 新数据源仍需初始化 Schema、定义业务口径并建立自己的评测基线 |
-| Agent 运行时 | 现有 Chat Agent 与 v0.10-A1 Run/Event 状态契约 | Run API 目前只创建排队状态；后台执行、实时 SSE、审批恢复和多实例存储尚未完成 |
-| 自动化验证 | `229 passed, 1 warning` | 这是 Python 测试结果，不代表生产可用性或并发能力 |
+| Agent 运行时 | 现有 Chat Agent 与 v0.10 Run/Event 执行器 | 已支持后台执行、实时 SSE、Trace 脱敏、审批/澄清/反馈和重启失败关闭；存储仍限单进程 |
+| 自动化验证 | Python、并发/故障、参考 SQL 和真实模型评测 | 这是本地证据，不代表生产可用性或多实例容量 |
 
 本项目不会承诺任意数据库都达到固定准确率，而是通过可重复的数据源准入门槛，为每个数据源和版本建立可解释的准确率范围。
 
@@ -134,16 +135,17 @@ sequenceDiagram
         T->>M: 读写记忆、schema 知识和历史记录
         T-->>A: 返回结果、图表和产物
         A-->>UI: 流式输出响应片段
-    else v0.10-A1 生命周期路径
+    else v0.10 受治理 Run 路径
         U->>API: POST /api/querymind/v1/agent-runs
         API->>R: 幂等创建 queued Run
-        U->>API: 查询 Run / Events 或取消
-        API->>R: 隔离读取或原子状态变更
-        R-->>U: 返回脱敏快照和有序事件
+        R->>A: 后台执行现有受治理 Agent
+        A-->>R: 写入脱敏 Trace 与状态
+        R-->>U: SSE 返回有序事件
+        U->>API: 必要时批准、澄清、反馈或取消
     end
 ```
 
-两条 API 路径目前尚未连通：Chat API 会执行现有的受治理单 Agent，v0.10-A1 Run API 目前只持久化生命周期状态。v0.10-A2 会让同一个 Agent 支持排队执行，不会为了追赶概念而引入没有评测收益的多 Agent 架构。
+Chat API 与 Run API 现在复用同一个受治理单 Agent。Run API 在其外层增加异步生命周期、可续传事件、取消、Trace 和人工接管，不引入没有评测收益的多 Agent 架构。
 
 ## 快速开始
 
@@ -237,7 +239,7 @@ python my_agent.py
 python webcomponent_demo.py --api-base http://127.0.0.1:8000
 ```
 
-### v0.10-A1 Agent Run API
+### v0.10 受治理 Agent Run API
 
 `my_agent.py` 会挂载 `FileSystemAgentRunStore`。脱敏的 Run 快照和有序事件默认保存在项目数据目录下的 `agent_runs` 中；可通过 `QUERYMIND_AGENT_RUNS_DIR` 指定其他本地开发路径。
 
@@ -255,7 +257,7 @@ curl -X POST "http://127.0.0.1:8000/api/querymind/v1/agent-runs/${RUN_ID}/cancel
   -d '{"expected_version":1}'
 ```
 
-创建请求必须携带 `Idempotency-Key`。同一个键和同一个请求会返回原 Run；同一个键对应不同请求时返回 `409`。读取范围由服务端解析出的租户和用户决定。这个 API **目前不会执行问题**，所以新 Run 会停留在 `queued`，直到 v0.10-A2 接入后台执行器。
+创建请求必须携带 `Idempotency-Key`。同一个键和同一个请求会返回原 Run；同一个键对应不同请求时返回 `409`。读取和决策范围由服务端解析出的租户和用户决定。后台执行器会运行现有 Chat Agent，并支持 SSE 续传、取消、审批、澄清、反馈和中断状态失败关闭。
 
 ### 验证
 
@@ -263,7 +265,7 @@ curl -X POST "http://127.0.0.1:8000/api/querymind/v1/agent-runs/${RUN_ID}/cancel
 .venv/bin/python -m pytest tests
 ```
 
-当前正式维护的 Python 测试结果为 `229 passed, 1 warning`。命令需要显式指定 `tests`：`frontends/webcomponent/test_backend.py` 是手工组件演示后端，其中以 `test_*` 命名的生成器会被仓库级裸 `pytest` 误收集。
+当前正式维护的 Python 测试结果为 `283 passed, 1 warning`。命令需要显式指定 `tests`：`frontends/webcomponent/test_backend.py` 是手工组件演示后端，其中以 `test_*` 命名的生成器会被仓库级裸 `pytest` 误收集。
 
 ## 评测与迭代证据
 
@@ -273,8 +275,10 @@ curl -X POST "http://127.0.0.1:8000/api/querymind/v1/agent-runs/${RUN_ID}/cancel
 | v0.5 | 自适应 Query Plan 路由 | 两轮业务准确率均为 62.50%，P95 降至 38.16/43.78 秒，但逐题结果并不完全稳定 |
 | v0.6 | 结构化恢复和高风险 SQL Reviewer 实验 | 没有提升，成本和延迟上升，因此默认关闭并保留负面实验记录 |
 | v0.7 | 与数据源绑定、带版本的业务指标语义契约 | AdventureWorks S5 单轮业务准确率 66.67%，不作为跨库保证 |
-| v0.8-v0.9 | 多数据源隔离、Chinook 准入和 100 题扩展计划 | Chinook 24 题开发运行中 S5 为 83.33%；100 题集目前只完成并验证 50 条参考 SQL，尚无 50 题 Agent 准确率 |
-| v0.10-A1 | Run/Event 生命周期、幂等、隔离、事件游标、版本与取消 | 状态契约已实现，Agent 后台执行仍待 A2 |
+| v0.8-v0.10 | 多数据源隔离、Chinook 准入和 100 题冻结评测 | 100/100 参考 SQL 通过；三轮业务正确率均值 67.67%、错误执行率 19.00%、一致率 81.00%，质量门禁 NOT READY |
+| v0.10-A-D | Run/Event、后台执行、SSE、Trace、HITL、反馈、并发与故障测试 | 单进程开发运行时已实现，多实例事务存储仍待后续 |
+| v0.10.1 双数据源复测 | 基准合同审计、Schema 主键粒度、合同授权计数、精确每组 Top-N、未规划过滤、安全聚合等价和最后成功 SQL 取证 | Chinook S5 三轮均值 79.00%，生产候选仍 NOT READY；AdventureWorks S5 三轮均值 86.11%、错误执行 6.94%，24 题跨源回归 READY；不代表任意数据库保证 |
+| v0.10.2 准确率与结果校验续接 | 连接计数 DISTINCT 保真、单表 `COUNT(*)` 计划误拦截修复、完整负实验回退、确定性 Result Validation 与 Run/Event 失败关闭 | 准确率保留快照为业务 84.67%、wrong-but-executed 9.00%；Result Validation 最终候选三轮为业务 84%/82%/84%、wrong 9%/12%/8%，均值 83.33%/9.67%；P95 76.01 秒、一致性 84%，admission 为 NOT READY |
 
 完整的实验方法和各版本证据见 [portfolio 文档](docs/portfolio/)与[评测支持文档](docs/zh/support/evaluation.md)；本地评测产物会继续记录逐题 SQL、错误位置、原因和改进建议。表里的数字只描述对应的一次受控实验，不代表任意数据源上的准确率保证。
 
@@ -301,14 +305,15 @@ curl -X POST "http://127.0.0.1:8000/api/querymind/v1/agent-runs/${RUN_ID}/cancel
 
 ### 进行中
 
-1. 完成 v0.10-A2：让现有单 Agent 支持排队 Run 执行、实时 SSE 续读、重启恢复和并发取消；随后增加脱敏的 Step/Tool Trace，但不改变 SQL 生成策略。
+1. 针对三轮正式评测中 24 道持续错误和 19 道不稳定题，优先修复窗口、比较、员工分析、JOIN 粒度与评测合同问题；每项修改都用冻结 holdout 复验。
 
 <figure>
   <img src="docs/figures/use-cases/eval-driven%20iterations.png" alt="评测驱动迭代" />
   <figcaption>评测驱动迭代：利用基准测试反馈持续优化提示词、治理策略和 SQL 恢复行为。</figcaption>
 </figure>
 
-2. 在运行时事件契约稳定前，将 Chinook 评测集暂停在 50/100。之后继续执行 [v0.9 计划](docs/portfolio/v0.9-production-benchmark.md)，冻结 60/20/20 开发集、测试集和留出集，再进行多轮真实模型评测。
+2. 根据 100 题失败分布选择下一轮通用检索、语义合同或结果校验优化，不写题号特例。
+3. 针对 Result Validation 最终候选的 P95 76.01 秒和一致性 84%，先从 development 集处理通用延迟与波动根因；本阶段未退出前不进入 P0-D。
 
 
 ### 未来计划

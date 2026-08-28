@@ -17,12 +17,14 @@ from QueryMind.core.agent_run import (
     AgentRun,
     AgentRunEvent,
     AgentRunIdempotencyConflictError,
+    AgentRunInput,
     AgentRunNotFoundError,
     AgentRunStatus,
     AgentRunStore,
     AgentRunTransitionError,
     AgentRunVersionConflictError,
     can_transition_run,
+    redact_run_event_data,
 )
 
 _RUN_ID_RE = re.compile(r"run_[0-9a-f]{32}")
@@ -43,6 +45,7 @@ def _new_run(
         database_id=database_id,
         question_redacted=question_redacted,
         conversation_id=conversation_id,
+        trace_id=f"trace_{uuid.uuid4().hex}",
     )
 
 
@@ -51,7 +54,7 @@ def _created_event(run: AgentRun) -> AgentRunEvent:
         run_id=run.id,
         sequence=1,
         event_type="run.created",
-        data={"status": run.status.value, "stage": run.current_stage},
+        data={"status": run.status.value, "stage": run.current_stage, "trace_id": run.trace_id},
     )
 
 
@@ -64,6 +67,7 @@ def _apply_transition(
     expected_version: int | None,
     event_type: str,
     event_data: dict[str, Any] | None,
+    snapshot_updates: dict[str, Any] | None,
 ) -> AgentRun:
     if run.status == target_status:
         return run
@@ -82,6 +86,15 @@ def _apply_transition(
     run.current_stage = stage or target_status.value
     run.version += 1
     run.updated_at = now
+    allowed_updates = {
+        "risk_level",
+        "result_summary_redacted",
+        "error_code",
+        "error_category",
+    }
+    for key, value in (snapshot_updates or {}).items():
+        if key in allowed_updates:
+            setattr(run, key, value)
     if target_status == AgentRunStatus.RUNNING and run.started_at is None:
         run.started_at = now
     if target_status in {
@@ -93,7 +106,7 @@ def _apply_transition(
         run.completed_at = now
 
     payload = {
-        **(event_data or {}),
+        **redact_run_event_data(event_data or {}),
         "previous_status": previous_status.value,
         "status": target_status.value,
         "stage": run.current_stage,
@@ -114,6 +127,7 @@ class MemoryAgentRunStore(AgentRunStore):
 
     def __init__(self) -> None:
         self._records: dict[str, tuple[AgentRun, list[AgentRunEvent]]] = {}
+        self._inputs: dict[str, AgentRunInput] = {}
         self._idempotency: dict[tuple[str, str, str], tuple[str, str]] = {}
         self._lock = asyncio.Lock()
 
@@ -127,6 +141,7 @@ class MemoryAgentRunStore(AgentRunStore):
         idempotency_key: str,
         request_fingerprint: str,
         conversation_id: str | None = None,
+        input_payload: AgentRunInput | None = None,
     ) -> tuple[AgentRun, bool]:
         scope = (tenant_id, user_id, idempotency_key)
         async with self._lock:
@@ -147,6 +162,7 @@ class MemoryAgentRunStore(AgentRunStore):
                 conversation_id=conversation_id,
             )
             self._records[run.id] = (run, [_created_event(run)])
+            self._inputs[run.id] = (input_payload or AgentRunInput(question=question_redacted)).model_copy(deep=True)
             self._idempotency[scope] = (run.id, request_fingerprint)
             return run.model_copy(deep=True), True
 
@@ -178,16 +194,62 @@ class MemoryAgentRunStore(AgentRunStore):
                 if event.sequence > after_sequence
             ]
 
-    async def transition_run(
+    async def append_event(
         self,
         run_id: str,
-        target_status: AgentRunStatus,
+        event_type: str,
         *,
         tenant_id: str,
         user_id: str,
-        stage: str | None = None,
-        expected_version: int | None = None,
-        event_type: str = "run.status_changed",
+        data: dict[str, Any] | None = None,
+    ) -> AgentRunEvent:
+        async with self._lock:
+            record = self._records.get(run_id)
+            if record is None or record[0].tenant_id != tenant_id or record[0].user_id != user_id:
+                raise AgentRunNotFoundError("Agent run not found")
+            event = AgentRunEvent(
+                run_id=run_id,
+                sequence=len(record[1]) + 1,
+                event_type=event_type,
+                data=redact_run_event_data(data or {}),
+            )
+            record[1].append(event)
+            return event.model_copy(deep=True)
+
+    async def get_run_input(
+        self, run_id: str, *, tenant_id: str, user_id: str
+    ) -> AgentRunInput:
+        async with self._lock:
+            record = self._records.get(run_id)
+            if record is None or record[0].tenant_id != tenant_id or record[0].user_id != user_id:
+                raise AgentRunNotFoundError("Agent run not found")
+            return self._inputs[run_id].model_copy(deep=True)
+
+    async def update_run_input(
+        self,
+        run_id: str,
+        payload: AgentRunInput,
+        *,
+        tenant_id: str,
+        user_id: str,
+    ) -> None:
+        async with self._lock:
+            record = self._records.get(run_id)
+            if record is None or record[0].tenant_id != tenant_id or record[0].user_id != user_id:
+                raise AgentRunNotFoundError("Agent run not found")
+            self._inputs[run_id] = payload.model_copy(deep=True)
+
+    async def resolve_gate(
+        self,
+        run_id: str,
+        target_status: AgentRunStatus,
+        input_payload: AgentRunInput,
+        *,
+        tenant_id: str,
+        user_id: str,
+        stage: str,
+        expected_version: int,
+        event_type: str,
         event_data: dict[str, Any] | None = None,
     ) -> AgentRun:
         async with self._lock:
@@ -202,6 +264,64 @@ class MemoryAgentRunStore(AgentRunStore):
                 expected_version=expected_version,
                 event_type=event_type,
                 event_data=event_data,
+                snapshot_updates=None,
+            )
+            self._inputs[run_id] = input_payload.model_copy(deep=True)
+            return run.model_copy(deep=True)
+
+    async def append_feedback(
+        self,
+        run_id: str,
+        feedback: dict[str, Any],
+        *,
+        tenant_id: str,
+        user_id: str,
+    ) -> None:
+        async with self._lock:
+            record = self._records.get(run_id)
+            if record is None or record[0].tenant_id != tenant_id or record[0].user_id != user_id:
+                raise AgentRunNotFoundError("Agent run not found")
+            self._inputs[run_id].feedback.append(dict(feedback))
+
+    async def list_active_runs(self) -> list[AgentRun]:
+        async with self._lock:
+            return [
+                run.model_copy(deep=True)
+                for run, _ in self._records.values()
+                if run.status not in {
+                    AgentRunStatus.SUCCEEDED,
+                    AgentRunStatus.FAILED,
+                    AgentRunStatus.REJECTED,
+                    AgentRunStatus.CANCELLED,
+                }
+            ]
+
+    async def transition_run(
+        self,
+        run_id: str,
+        target_status: AgentRunStatus,
+        *,
+        tenant_id: str,
+        user_id: str,
+        stage: str | None = None,
+        expected_version: int | None = None,
+        event_type: str = "run.status_changed",
+        event_data: dict[str, Any] | None = None,
+        snapshot_updates: dict[str, Any] | None = None,
+    ) -> AgentRun:
+        async with self._lock:
+            record = self._records.get(run_id)
+            if record is None or record[0].tenant_id != tenant_id or record[0].user_id != user_id:
+                raise AgentRunNotFoundError("Agent run not found")
+            run = _apply_transition(
+                record[0],
+                record[1],
+                target_status,
+                stage=stage,
+                expected_version=expected_version,
+                event_type=event_type,
+                event_data=event_data,
+                snapshot_updates=snapshot_updates,
             )
             return run.model_copy(deep=True)
 
@@ -251,20 +371,29 @@ class FileSystemAgentRunStore(AgentRunStore):
             raise AgentRunNotFoundError("Agent run not found")
         return self.runs_dir / f"{run_id}.json"
 
-    def _load_record(self, run_id: str) -> tuple[AgentRun, list[AgentRunEvent]]:
+    def _load_record(self, run_id: str) -> tuple[AgentRun, list[AgentRunEvent], AgentRunInput]:
         payload = self._read_json(self._record_path(run_id))
         if not payload:
             raise AgentRunNotFoundError("Agent run not found")
         run = AgentRun.model_validate(payload.get("run"))
         events = [AgentRunEvent.model_validate(item) for item in payload.get("events", [])]
-        return run, events
+        run_input = AgentRunInput.model_validate(
+            payload.get("input") or {"question": run.question_redacted}
+        )
+        return run, events, run_input
 
-    def _save_record(self, run: AgentRun, events: list[AgentRunEvent]) -> None:
+    def _save_record(
+        self,
+        run: AgentRun,
+        events: list[AgentRunEvent],
+        run_input: AgentRunInput,
+    ) -> None:
         self._write_json_atomic(
             self._record_path(run.id),
             {
                 "run": run.model_dump(mode="json"),
                 "events": [event.model_dump(mode="json") for event in events],
+                "input": run_input.model_dump(mode="json"),
             },
         )
 
@@ -278,6 +407,7 @@ class FileSystemAgentRunStore(AgentRunStore):
         idempotency_key: str,
         request_fingerprint: str,
         conversation_id: str | None = None,
+        input_payload: AgentRunInput | None = None,
     ) -> tuple[AgentRun, bool]:
         fingerprint = self._idempotency_fingerprint(tenant_id, user_id, idempotency_key)
         with self._lock:
@@ -288,7 +418,7 @@ class FileSystemAgentRunStore(AgentRunStore):
                     raise AgentRunIdempotencyConflictError(
                         "Idempotency key was already used for a different request"
                     )
-                run, _ = self._load_record(str(existing.get("run_id") or ""))
+                run, _, _ = self._load_record(str(existing.get("run_id") or ""))
                 return run, False
 
             run = _new_run(
@@ -298,7 +428,11 @@ class FileSystemAgentRunStore(AgentRunStore):
                 question_redacted=question_redacted,
                 conversation_id=conversation_id,
             )
-            self._save_record(run, [_created_event(run)])
+            self._save_record(
+                run,
+                [_created_event(run)],
+                input_payload or AgentRunInput(question=question_redacted),
+            )
             index[fingerprint] = {
                 "run_id": run.id,
                 "request_fingerprint": request_fingerprint,
@@ -309,7 +443,7 @@ class FileSystemAgentRunStore(AgentRunStore):
     async def get_run(self, run_id: str, *, tenant_id: str, user_id: str) -> AgentRun | None:
         with self._lock:
             try:
-                run, _ = self._load_record(run_id)
+                run, _, _ = self._load_record(run_id)
             except AgentRunNotFoundError:
                 return None
             if run.tenant_id != tenant_id or run.user_id != user_id:
@@ -325,10 +459,118 @@ class FileSystemAgentRunStore(AgentRunStore):
         after_sequence: int = 0,
     ) -> list[AgentRunEvent]:
         with self._lock:
-            run, events = self._load_record(run_id)
+            run, events, _ = self._load_record(run_id)
             if run.tenant_id != tenant_id or run.user_id != user_id:
                 raise AgentRunNotFoundError("Agent run not found")
             return [event for event in events if event.sequence > after_sequence]
+
+    async def append_event(
+        self,
+        run_id: str,
+        event_type: str,
+        *,
+        tenant_id: str,
+        user_id: str,
+        data: dict[str, Any] | None = None,
+    ) -> AgentRunEvent:
+        with self._lock:
+            run, events, run_input = self._load_record(run_id)
+            if run.tenant_id != tenant_id or run.user_id != user_id:
+                raise AgentRunNotFoundError("Agent run not found")
+            event = AgentRunEvent(
+                run_id=run_id,
+                sequence=len(events) + 1,
+                event_type=event_type,
+                data=redact_run_event_data(data or {}),
+            )
+            events.append(event)
+            self._save_record(run, events, run_input)
+            return event
+
+    async def get_run_input(
+        self, run_id: str, *, tenant_id: str, user_id: str
+    ) -> AgentRunInput:
+        with self._lock:
+            run, _, run_input = self._load_record(run_id)
+            if run.tenant_id != tenant_id or run.user_id != user_id:
+                raise AgentRunNotFoundError("Agent run not found")
+            return run_input
+
+    async def update_run_input(
+        self,
+        run_id: str,
+        payload: AgentRunInput,
+        *,
+        tenant_id: str,
+        user_id: str,
+    ) -> None:
+        with self._lock:
+            run, events, _ = self._load_record(run_id)
+            if run.tenant_id != tenant_id or run.user_id != user_id:
+                raise AgentRunNotFoundError("Agent run not found")
+            self._save_record(run, events, payload)
+
+    async def resolve_gate(
+        self,
+        run_id: str,
+        target_status: AgentRunStatus,
+        input_payload: AgentRunInput,
+        *,
+        tenant_id: str,
+        user_id: str,
+        stage: str,
+        expected_version: int,
+        event_type: str,
+        event_data: dict[str, Any] | None = None,
+    ) -> AgentRun:
+        with self._lock:
+            run, events, _ = self._load_record(run_id)
+            if run.tenant_id != tenant_id or run.user_id != user_id:
+                raise AgentRunNotFoundError("Agent run not found")
+            run = _apply_transition(
+                run,
+                events,
+                target_status,
+                stage=stage,
+                expected_version=expected_version,
+                event_type=event_type,
+                event_data=event_data,
+                snapshot_updates=None,
+            )
+            self._save_record(run, events, input_payload)
+            return run
+
+    async def append_feedback(
+        self,
+        run_id: str,
+        feedback: dict[str, Any],
+        *,
+        tenant_id: str,
+        user_id: str,
+    ) -> None:
+        with self._lock:
+            run, events, run_input = self._load_record(run_id)
+            if run.tenant_id != tenant_id or run.user_id != user_id:
+                raise AgentRunNotFoundError("Agent run not found")
+            run_input.feedback.append(dict(feedback))
+            self._save_record(run, events, run_input)
+
+    async def list_active_runs(self) -> list[AgentRun]:
+        with self._lock:
+            active: list[AgentRun] = []
+            for path in sorted(self.runs_dir.glob("run_*.json")):
+                try:
+                    run, _, _ = self._load_record(path.stem)
+                except (AgentRunNotFoundError, ValueError):
+                    continue
+                if run.status not in {
+                    AgentRunStatus.SUCCEEDED,
+                    AgentRunStatus.FAILED,
+                    AgentRunStatus.REJECTED,
+                    AgentRunStatus.CANCELLED,
+                }:
+                    active.append(run)
+            return active
 
     async def transition_run(
         self,
@@ -341,9 +583,10 @@ class FileSystemAgentRunStore(AgentRunStore):
         expected_version: int | None = None,
         event_type: str = "run.status_changed",
         event_data: dict[str, Any] | None = None,
+        snapshot_updates: dict[str, Any] | None = None,
     ) -> AgentRun:
         with self._lock:
-            run, events = self._load_record(run_id)
+            run, events, run_input = self._load_record(run_id)
             if run.tenant_id != tenant_id or run.user_id != user_id:
                 raise AgentRunNotFoundError("Agent run not found")
             original_version = run.version
@@ -355,7 +598,8 @@ class FileSystemAgentRunStore(AgentRunStore):
                 expected_version=expected_version,
                 event_type=event_type,
                 event_data=event_data,
+                snapshot_updates=snapshot_updates,
             )
             if run.version != original_version:
-                self._save_record(run, events)
+                self._save_record(run, events, run_input)
             return run

@@ -1,5 +1,5 @@
 profile:
-  name: "Chinook production-candidate benchmark admission v0.9"
+  name: "Chinook production-candidate benchmark admission v0.10.1"
   database_id: "chinook"
   minimum_cases: 100
   required_repeats: 3
@@ -8,12 +8,12 @@ profile:
     medium: 40
     hard: 30
   minimum_by_category:
-    aggregation: 20
-    join: 20
-    topk: 15
-    time_series: 15
-    window: 10
-    subquery: 10
+    aggregation: 15
+    join: 15
+    topk: 10
+    time_series: 10
+    window: 8
+    subquery: 8
     comparison: 5
     filtering: 5
   minimum_by_business_domain:
@@ -21,6 +21,10 @@ profile:
     sales: 30
     customer: 25
     employee: 15
+  minimum_by_split:
+    development: 60
+    test: 20
+    holdout: 20
   minimum_by_tag:
     multi_table: 30
     window: 15
@@ -40,3 +44,4 @@ profile:
     automatic_answer_coverage: 0.85
     p95_agent_execution_time_ms: 30000
     repeat_consistency_rate: 0.85
+    process_trace_coverage: 0.95

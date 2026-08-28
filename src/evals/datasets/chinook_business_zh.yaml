@@ -1,6 +1,12 @@
 dataset:
-  name: "Chinook 中文经营问答跨数据源基准 v0.9-dev"
-  description: "50 条独立设计的数字媒体商店业务问题；前 24 题保留 v0.8 基线，新增题用于逐步建设 100 题生产候选基准。"
+  name: "Chinook 中文经营问答跨数据源基准 v0.10.1"
+  description: "100 条分层数字媒体商店业务问题；v0.10.1 明确存在歧义的输出字段和并列排序，不修改参考业务结果。"
+  includes: ["chinook_business_zh_v010.yaml"]
+  sql_contract_feature_mode: advisory
+  split_ranges:
+    development: {start: ch_zh_001, end: ch_zh_060}
+    test: {start: ch_zh_061, end: ch_zh_080}
+    holdout: {start: ch_zh_081, end: ch_zh_100}
 
   test_cases:
     - id: "ch_zh_001"
@@ -220,7 +226,7 @@ dataset:
     - id: "ch_zh_011"
       database_id: "chinook"
       dialect: "postgres"
-      query: "每个播放列表包含多少首不同曲目？按曲目数从高到低排列。"
+      query: "每个播放列表包含多少首不同曲目？返回播放列表编号、名称和不同曲目数；按曲目数从高到低、播放列表编号从小到大排列。"
       ground_truth_sql: |
         SELECT p.playlist_id, p.name AS playlist_name,
                COUNT(DISTINCT pt.track_id) AS track_count
@@ -427,6 +433,7 @@ dataset:
         required_columns: ["composer"]
         required_filter_columns: ["composer"]
         max_projection_count: 2
+      result_comparison: {order_sensitive: false}
       tags: ["aggregation", "null_handling", "topk", "ordering"]
       difficulty: "easy"
       metadata: {category: "topk", source: "manual", query_language: "zh", business_domain: "catalog"}

@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from typing import Annotated, Any
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from QueryMind.core.agent_run import (
     AgentRunIdempotencyConflictError,
+    AgentRunInput,
     AgentRunNotFoundError,
     AgentRunStatus,
     AgentRunStore,
@@ -20,6 +23,7 @@ from QueryMind.core.agent_run import (
 )
 from QueryMind.core.user import User
 from QueryMind.core.user.request_context import RequestContext
+from QueryMind.server.base.agent_run_executor import AgentRunExecutor
 
 
 class CreateAgentRunRequest(BaseModel):
@@ -42,6 +46,30 @@ class CancelAgentRunRequest(BaseModel):
     """Optional optimistic concurrency guard for cancellation."""
 
     expected_version: int | None = Field(default=None, ge=1)
+
+
+class ApprovalDecisionRequest(BaseModel):
+    decision: str = Field(pattern="^(approve|reject)$")
+    expected_version: int = Field(ge=1)
+    reason: str | None = Field(default=None, max_length=1000)
+
+
+class ClarificationRequest(BaseModel):
+    answer: str = Field(min_length=1, max_length=4000)
+    expected_version: int = Field(ge=1)
+
+    @field_validator("answer")
+    @classmethod
+    def reject_blank_answer(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("answer must not be blank")
+        return value
+
+
+class AgentRunFeedbackRequest(BaseModel):
+    rating: str = Field(pattern="^(correct|partially_correct|incorrect)$")
+    reason: str | None = Field(default=None, max_length=2000)
 
 
 async def _resolve_current_user(agent: Any, request: Request) -> User:
@@ -99,8 +127,9 @@ def register_agent_run_routes(
     app: FastAPI,
     agent: Any,
     run_store: AgentRunStore | None,
+    executor: AgentRunExecutor | None = None,
 ) -> None:
-    """Register the v0.10-A lifecycle API without changing chat execution."""
+    """Register durable execution, trace, HITL, and feedback APIs."""
 
     def _store() -> AgentRunStore:
         if run_store is None:
@@ -136,11 +165,17 @@ def register_agent_run_routes(
                 conversation_id=payload.conversation_id,
                 idempotency_key=idempotency_key,
                 request_fingerprint=_create_request_fingerprint(payload),
+                input_payload=AgentRunInput(
+                    question=payload.question,
+                    user=user.model_dump(mode="json"),
+                ),
             )
         except AgentRunIdempotencyConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        if created and executor is not None:
+            executor.submit(run.id, tenant_id=_tenant_id(user), user_id=user.id)
         return {"created": created, "run": _run_response(run)}
 
     @app.get("/api/querymind/v1/agent-runs/{run_id}")
@@ -176,6 +211,55 @@ def register_agent_run_routes(
             "next_after": events[-1].sequence if events else after,
         }
 
+    @app.get("/api/querymind/v1/agent-runs/{run_id}/events/stream")
+    async def stream_agent_run_events(
+        run_id: str,
+        request: Request,
+        after: int = Query(default=0, ge=0),
+    ) -> StreamingResponse:
+        user = await _resolve_current_user(agent, request)
+        tenant_id = _tenant_id(user)
+        if await _store().get_run(run_id, tenant_id=tenant_id, user_id=user.id) is None:
+            raise HTTPException(status_code=404, detail="Agent run not found")
+
+        async def generate():
+            cursor = after
+            while True:
+                events = await _store().list_events(
+                    run_id,
+                    tenant_id=tenant_id,
+                    user_id=user.id,
+                    after_sequence=cursor,
+                )
+                for event in events:
+                    cursor = event.sequence
+                    yield f"data: {event.model_dump_json()}\n\n"
+                run = await _store().get_run(
+                    run_id,
+                    tenant_id=tenant_id,
+                    user_id=user.id,
+                )
+                if run is None or run.status in {
+                    AgentRunStatus.SUCCEEDED,
+                    AgentRunStatus.FAILED,
+                    AgentRunStatus.REJECTED,
+                    AgentRunStatus.CANCELLED,
+                }:
+                    yield "data: [DONE]\n\n"
+                    return
+                if await request.is_disconnected():
+                    return
+                await asyncio.sleep(0.1)
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     @app.post("/api/querymind/v1/agent-runs/{run_id}/cancel")
     async def cancel_agent_run(
         run_id: str,
@@ -197,4 +281,131 @@ def register_agent_run_routes(
             raise HTTPException(status_code=404, detail="Agent run not found") from exc
         except (AgentRunTransitionError, AgentRunVersionConflictError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if executor is not None:
+            await executor.cancel(run_id)
         return {"run": _run_response(run)}
+
+    @app.post("/api/querymind/v1/agent-runs/{run_id}/approvals")
+    async def decide_agent_run_approval(
+        run_id: str,
+        payload: ApprovalDecisionRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        user = await _resolve_current_user(agent, request)
+        tenant_id = _tenant_id(user)
+        try:
+            run_input = await _store().get_run_input(
+                run_id,
+                tenant_id=tenant_id,
+                user_id=user.id,
+            )
+            run_input.operator_decisions.append(
+                {
+                    "decision": payload.decision,
+                    "reason": payload.reason,
+                    "decided_by": user.id,
+                }
+            )
+            if payload.decision == "reject":
+                run_input.gate_resolved = "rejected"
+                run = await _store().resolve_gate(
+                    run_id,
+                    AgentRunStatus.REJECTED,
+                    run_input,
+                    tenant_id=tenant_id,
+                    user_id=user.id,
+                    stage="approval.rejected",
+                    expected_version=payload.expected_version,
+                    event_type="approval.rejected",
+                    event_data={"reason_provided": bool(payload.reason)},
+                )
+            else:
+                run_input.gate_resolved = "approval"
+                run = await _store().resolve_gate(
+                    run_id,
+                    AgentRunStatus.RUNNING,
+                    run_input,
+                    tenant_id=tenant_id,
+                    user_id=user.id,
+                    stage="approval.approved",
+                    expected_version=payload.expected_version,
+                    event_type="approval.approved",
+                    event_data={"reason_provided": bool(payload.reason)},
+                )
+                if executor is not None:
+                    executor.submit(run_id, tenant_id=tenant_id, user_id=user.id)
+        except AgentRunNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Agent run not found") from exc
+        except (AgentRunTransitionError, AgentRunVersionConflictError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"run": _run_response(run)}
+
+    @app.post("/api/querymind/v1/agent-runs/{run_id}/clarifications")
+    async def clarify_agent_run(
+        run_id: str,
+        payload: ClarificationRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        user = await _resolve_current_user(agent, request)
+        tenant_id = _tenant_id(user)
+        try:
+            run_input = await _store().get_run_input(
+                run_id,
+                tenant_id=tenant_id,
+                user_id=user.id,
+            )
+            run_input.clarification_answer = payload.answer
+            run_input.gate_resolved = "clarification"
+            run = await _store().resolve_gate(
+                run_id,
+                AgentRunStatus.RUNNING,
+                run_input,
+                tenant_id=tenant_id,
+                user_id=user.id,
+                stage="clarification.received",
+                expected_version=payload.expected_version,
+                event_type="clarification.received",
+                event_data={"answer_received": True},
+            )
+            if executor is not None:
+                executor.submit(run_id, tenant_id=tenant_id, user_id=user.id)
+        except AgentRunNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Agent run not found") from exc
+        except (AgentRunTransitionError, AgentRunVersionConflictError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"run": _run_response(run)}
+
+    @app.post("/api/querymind/v1/agent-runs/{run_id}/feedback", status_code=202)
+    async def create_agent_run_feedback(
+        run_id: str,
+        payload: AgentRunFeedbackRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        user = await _resolve_current_user(agent, request)
+        tenant_id = _tenant_id(user)
+        run = await _store().get_run(run_id, tenant_id=tenant_id, user_id=user.id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Agent run not found")
+        if run.status not in {
+            AgentRunStatus.SUCCEEDED,
+            AgentRunStatus.FAILED,
+            AgentRunStatus.REJECTED,
+        }:
+            raise HTTPException(status_code=409, detail="Run is not ready for feedback")
+        await _store().append_feedback(
+            run_id,
+            payload.model_dump(mode="json"),
+            tenant_id=tenant_id,
+            user_id=user.id,
+        )
+        event = await _store().append_event(
+            run_id,
+            "feedback.recorded",
+            tenant_id=tenant_id,
+            user_id=user.id,
+            data={
+                "rating": payload.rating,
+                "reason_provided": bool(payload.reason),
+            },
+        )
+        return {"event": event.model_dump(mode="json")}

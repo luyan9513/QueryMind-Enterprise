@@ -17,6 +17,46 @@ from QueryMind.core.agent.semantic_contract import (
 from QueryMind.core.tool import Tool, ToolContext, ToolResult
 
 
+def _repair_hints(issues: list[str]) -> list[str]:
+    """Turn deterministic plan issues into concise, actionable repair steps."""
+    hints: list[str] = []
+    for issue in issues:
+        if issue.startswith("joined_primary_key_count_requires_distinct:"):
+            column = issue.split(":", 1)[1]
+            hints.append(
+                f"replace COUNT({column}) with COUNT(DISTINCT {column})"
+            )
+        elif issue.startswith(
+            "grouped_entity_primary_key_missing_from_grain_keys:"
+        ):
+            column = issue.split(":", 1)[1]
+            hints.append(f"add {column} to grain_keys")
+        elif issue.startswith(
+            "grouped_entity_primary_key_missing_from_required_columns:"
+        ):
+            column = issue.split(":", 1)[1]
+            hints.append(f"add {column} to required_columns")
+        elif issue.startswith("grain_key_conflicts_with_row_grain:"):
+            column = issue.split(":", 1)[1]
+            hints.append(
+                f"remove {column} from grain_keys; grain_keys must identify the "
+                "final result row, not a joined detail row"
+            )
+        elif issue.startswith("unrequested_distinct_primary_key_count:"):
+            column = issue.split(":", 1)[1]
+            hints.append(
+                f"use COUNT(*) instead of COUNT(DISTINCT {column}) for this "
+                "single-table row count"
+            )
+        elif issue.startswith("top_per_group_limit_mismatch:"):
+            expected = issue.split("expected=", 1)[1].split(":", 1)[0]
+            hints.append(
+                f"set partition_limit to {expected} and plan a window ranking "
+                f"followed by a filter that retains {expected} row(s) per group"
+            )
+    return list(dict.fromkeys(hints))
+
+
 class SubmitQueryPlanTool(Tool[QueryPlan]):
     """Persist a validated, turn-local plan for SQL alignment checks."""
 
@@ -39,7 +79,8 @@ class SubmitQueryPlanTool(Tool[QueryPlan]):
             "Submit the exact query plan after schema retrieval and before run_sql. "
             "Cite only retrieved physical tables and qualified columns. The plan "
             "must define row grain, exact output columns, filters, aggregation, "
-            "grouping, ordering, semantic contract IDs, and unresolved questions."
+            "grouping, stable grain keys, ordering, semantic contract IDs, and "
+            "unresolved questions."
         )
 
     def get_args_schema(self) -> Type[QueryPlan]:
@@ -103,17 +144,26 @@ class SubmitQueryPlanTool(Tool[QueryPlan]):
             )
 
         issue_text = "; ".join(check.issues[:8])
+        repair_hints = _repair_hints(check.issues)
+        repair_text = (
+            " Required correction: " + "; ".join(repair_hints[:4]) + "."
+            if repair_hints
+            else ""
+        )
+        rejection_message = (
+            "Query plan rejected. Retrieve the missing schema evidence or ask "
+            "the user to resolve ambiguity, then submit a corrected plan. "
+            f"Issues: {issue_text}.{repair_text} Do not resubmit an unchanged plan."
+        )
         return ToolResult(
             success=False,
-            result_for_llm=(
-                "Query plan rejected. Retrieve the missing schema evidence or ask "
-                f"the user to resolve ambiguity, then submit a new plan: {issue_text}"
-            ),
-            error="Query plan is not grounded in schema and semantic evidence",
+            result_for_llm=rejection_message,
+            error=rejection_message,
             metadata={
                 "tool_name": self.name,
                 "rejection_stage": "planning",
                 "rejection_code": "query_plan_evidence_gap",
+                "query_plan_repair_hints": repair_hints,
                 **snapshot,
             },
         )

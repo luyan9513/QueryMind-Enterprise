@@ -1,17 +1,19 @@
 """Generic SQL query execution tool with dependency injection."""
 
-from typing import Any, Dict, List, Optional, Type, cast
 import uuid
-from QueryMind.core.tool import Tool, ToolContext, ToolResult
+from typing import Any, Dict, List, Optional, Type, cast
+
+from QueryMind.capabilities.file_system import FileSystem
+from QueryMind.capabilities.sql_runner import RunSqlToolArgs, SqlRunner
 from QueryMind.components import (
-    UiComponent,
+    ComponentType,
     DataFrameComponent,
     NotificationComponent,
-    ComponentType,
     SimpleTextComponent,
+    UiComponent,
 )
-from QueryMind.capabilities.sql_runner import SqlRunner, RunSqlToolArgs
-from QueryMind.capabilities.file_system import FileSystem
+from QueryMind.core.agent.result_validation import validate_query_result
+from QueryMind.core.tool import Tool, ToolContext, ToolResult
 from QueryMind.integrations.local import LocalFileSystem
 
 
@@ -109,6 +111,27 @@ class RunSqlTool(Tool[RunSqlToolArgs]):
                     "output_file": filename,
                     "executed_sql": args.sql.strip(),
                 }
+                validation = validate_query_result(
+                    context.metadata,
+                    columns=[str(column) for column in columns],
+                    rows=results_data,
+                )
+                metadata["result_validation"] = validation.to_metadata()
+                if validation.status != "passed":
+                    issue_text = "; ".join(validation.issues)
+                    result += (
+                        "\n\nRuntime result validation did not pass: "
+                        f"{issue_text}. This result must not be treated as "
+                        "validated; repair the query or report the uncertainty."
+                    )
+                if row_count == 0:
+                    result += (
+                        "\n\nValidation notice: the query returned zero rows. Before "
+                        "answering, recheck whether every filter was supported by "
+                        "the user request or a semantic contract, plus join direction, "
+                        "date boundaries, and NULL behavior. If zero rows are expected, "
+                        "explain that without rerunning unchanged SQL."
+                    )
             else:
                 # The SqlRunner returned a one-column rows_affected frame.
                 rows_affected = (
